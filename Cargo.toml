@@ -1,0 +1,25 @@
+[package]
+name = "music-tui"
+version = "0.1.0"
+edition = "2024"
+description = "A keyboard- and mouse-driven terminal music player built with ratatui"
+license = "MIT"
+repository = "https://github.com/adelmonte/music-tui"
+readme = "README.md"
+keywords = ["music", "player", "tui", "terminal", "ratatui"]
+categories = ["multimedia::audio", "command-line-utilities"]
+
+[dependencies]
+anyhow = "1.0.102"
+crossterm = "0.29.0"
+directories = "6.0.0"
+image = "0.25.10"
+lofty = "0.24.0"
+ratatui = "0.30"
+ratatui-image = { version = "11.0.2", default-features = false, features = ["crossterm", "image-defaults"] }
+rodio = { version = "0.22.2", features = ["symphonia-all"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "1.1.2"
+toml_edit = "0.25.12"
+walkdir = "2.5.0"
