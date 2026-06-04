@@ -18,15 +18,23 @@ transport icons.
 - Mouse support throughout; resizable panes (keyboard and drag)
 - Configurable color theme
 
-## Requirements
+## Recommended
 
-- Rust (2024 edition; tested on 1.92)
-- An audio output device (ALSA on Linux)
 - A [Nerd Font](https://www.nerdfonts.com/) for the transport icons
 - **kitty ≥ 0.40** for album art and 2× transport icons (other terminals run fine; those
   two features degrade gracefully)
 
-## Build & run
+## Install
+
+### Arch Linux (AUR)
+
+[`music-tui`](https://aur.archlinux.org/packages/music-tui) is available on the AUR:
+
+```sh
+yay -S music-tui
+```
+
+### Build from source
 
 ```sh
 cargo run --release
