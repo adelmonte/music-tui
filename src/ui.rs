@@ -154,16 +154,25 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     let block = titled(" Search (title / artist / album) ", focused, t);
     let inner = block.inner(area);
     app.rects.search = inner;
-    let text = if app.search.is_empty() && !focused {
-        Span::raw("Click or press / to search").fg(t.dim)
+    let mut spans = vec![Span::raw("🔎 ")];
+    if app.search.is_empty() && !focused {
+        spans.push(Span::raw("Click or press / to search").fg(t.dim));
+    } else if !focused {
+        spans.push(Span::raw(&app.search));
     } else {
-        Span::raw(&app.search)
-    };
-    let mut line = Line::from(vec![Span::raw("🔎 "), text]);
-    if focused {
-        line.spans.push(Span::raw("█").fg(t.accent));
+        // Split the text at the cursor; the character under the cursor is drawn
+        // reversed as a block, or a trailing block when the cursor is at the end.
+        let chars: Vec<char> = app.search.chars().collect();
+        let cur = app.search_cursor.min(chars.len());
+        spans.push(Span::raw(chars[..cur].iter().collect::<String>()));
+        if cur < chars.len() {
+            spans.push(Span::raw(chars[cur].to_string()).reversed());
+            spans.push(Span::raw(chars[cur + 1..].iter().collect::<String>()));
+        } else {
+            spans.push(Span::raw("█").fg(t.accent));
+        }
     }
-    f.render_widget(Paragraph::new(line).block(block), area);
+    f.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
 }
 
 fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
@@ -675,6 +684,13 @@ fn draw_help(f: &mut Frame, area: Rect, t: Theme) {
                     ("type", "filter results"),
                     ("Enter/↓", "go to results"),
                     ("Esc", "clear search"),
+                    ("^A / ^E", "start / end of line"),
+                    ("^B/^F ←→", "move by char"),
+                    ("Alt+B/F", "move by word"),
+                    ("^W / Alt+⌫", "del word back"),
+                    ("Alt+D", "del word forward"),
+                    ("^U / ^K", "kill to start / end"),
+                    ("^Y", "yank (paste kill)"),
                 ],
             ),
             (

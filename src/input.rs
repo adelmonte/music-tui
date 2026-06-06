@@ -50,7 +50,12 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     }
 
     // Search field is just another focusable element; Tab/arrows move out of it.
+    // Within it, readline/Emacs editing keys are supported (Ctrl-A/E/B/F, word
+    // motions, kills, yank) — checked before the plain-char insert so a Ctrl/Alt
+    // chord is not typed as text.
     if app.is_searching() {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Enter | KeyCode::Down => app.set_focus(Focus::Artists),
             KeyCode::Tab => app.cycle_focus(true),
@@ -59,8 +64,34 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 app.clear_search();
                 app.set_focus(Focus::Artists);
             }
+
+            // Motion
+            KeyCode::Char('a') if ctrl => app.search_home(),
+            KeyCode::Char('e') if ctrl => app.search_end(),
+            KeyCode::Char('b') if ctrl => app.search_move(-1),
+            KeyCode::Char('f') if ctrl => app.search_move(1),
+            KeyCode::Char('b') if alt => app.search_move_word(-1),
+            KeyCode::Char('f') if alt => app.search_move_word(1),
+            KeyCode::Left if ctrl || alt => app.search_move_word(-1),
+            KeyCode::Right if ctrl || alt => app.search_move_word(1),
+            KeyCode::Left => app.search_move(-1),
+            KeyCode::Right => app.search_move(1),
+            KeyCode::Home => app.search_home(),
+            KeyCode::End => app.search_end(),
+
+            // Deletion / kill / yank
+            KeyCode::Char('d') if ctrl => app.search_delete_forward(),
+            KeyCode::Char('d') if alt => app.search_kill_word_forward(),
+            KeyCode::Char('w') if ctrl => app.search_kill_word_back(),
+            KeyCode::Char('u') if ctrl => app.search_kill_to_start(),
+            KeyCode::Char('k') if ctrl => app.search_kill_to_end(),
+            KeyCode::Char('y') if ctrl => app.search_yank(),
+            KeyCode::Char('h') if ctrl => app.search_backspace(),
+            KeyCode::Backspace if alt => app.search_kill_word_back(),
+            KeyCode::Delete => app.search_delete_forward(),
             KeyCode::Backspace => app.search_backspace(),
-            KeyCode::Char(c) => app.search_input(c),
+
+            KeyCode::Char(c) if !ctrl && !alt => app.search_input(c),
             _ => {}
         }
         return;

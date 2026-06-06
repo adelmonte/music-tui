@@ -164,6 +164,10 @@ pub struct App {
     /// Whether all-library art pre-caching is enabled.
     pub cache_all_art: bool,
     pub search: String,
+    /// Cursor position within `search`, as a character index (0..=char count).
+    pub search_cursor: usize,
+    /// Last text removed by a kill command (Ctrl-W/U/K/Alt-D), for Ctrl-Y yank.
+    kill_buffer: String,
 
     // Playlists tab state.
     pub playlists: Vec<Playlist>,
@@ -255,6 +259,8 @@ impl App {
             queue_pct,
             cache_all_art,
             search: String::new(),
+            search_cursor: 0,
+            kill_buffer: String::new(),
             playlists,
             playlist_state: ListState::default(),
             pl_track_state: ListState::default(),
@@ -531,6 +537,10 @@ impl App {
     }
 
     pub fn set_focus(&mut self, focus: Focus) {
+        // Entering the search field drops the cursor at the end of any existing text.
+        if focus == Focus::Search {
+            self.search_cursor = self.search.chars().count();
+        }
         self.focus = focus;
     }
 
@@ -897,16 +907,136 @@ impl App {
 
     // --- search ----------------------------------------------------------
 
+    /// Byte offset of character index `i` in `search` (`search.len()` at the end).
+    fn search_byte_at(&self, i: usize) -> usize {
+        self.search
+            .char_indices()
+            .nth(i)
+            .map(|(b, _)| b)
+            .unwrap_or(self.search.len())
+    }
+
+    fn search_char_len(&self) -> usize {
+        self.search.chars().count()
+    }
+
     pub fn search_input(&mut self, c: char) {
-        self.search.push(c);
+        let b = self.search_byte_at(self.search_cursor);
+        self.search.insert(b, c);
+        self.search_cursor += 1;
         self.refresh_views();
     }
+
+    /// Delete the character before the cursor (Backspace / Ctrl-H).
     pub fn search_backspace(&mut self) {
-        self.search.pop();
+        if self.search_cursor == 0 {
+            return;
+        }
+        let start = self.search_byte_at(self.search_cursor - 1);
+        let end = self.search_byte_at(self.search_cursor);
+        self.search.replace_range(start..end, "");
+        self.search_cursor -= 1;
         self.refresh_views();
     }
+
+    /// Delete the character under the cursor (Delete / Ctrl-D).
+    pub fn search_delete_forward(&mut self) {
+        if self.search_cursor >= self.search_char_len() {
+            return;
+        }
+        let start = self.search_byte_at(self.search_cursor);
+        let end = self.search_byte_at(self.search_cursor + 1);
+        self.search.replace_range(start..end, "");
+        self.refresh_views();
+    }
+
     pub fn clear_search(&mut self) {
         self.search.clear();
+        self.search_cursor = 0;
+        self.refresh_views();
+    }
+
+    // Cursor motion (no filter change, so no refresh needed).
+    pub fn search_home(&mut self) {
+        self.search_cursor = 0;
+    }
+    pub fn search_end(&mut self) {
+        self.search_cursor = self.search_char_len();
+    }
+    pub fn search_move(&mut self, delta: i32) {
+        let len = self.search_char_len() as i32;
+        self.search_cursor = (self.search_cursor as i32 + delta).clamp(0, len) as usize;
+    }
+
+    /// Word-boundary target from the cursor: `dir < 0` moves back over a run of
+    /// separators then a run of word chars; `dir > 0` does the same forward.
+    fn search_word_boundary(&self, dir: i32) -> usize {
+        let chars: Vec<char> = self.search.chars().collect();
+        let word = |c: char| c.is_alphanumeric();
+        let mut i = self.search_cursor;
+        if dir < 0 {
+            while i > 0 && !word(chars[i - 1]) {
+                i -= 1;
+            }
+            while i > 0 && word(chars[i - 1]) {
+                i -= 1;
+            }
+        } else {
+            let n = chars.len();
+            while i < n && !word(chars[i]) {
+                i += 1;
+            }
+            while i < n && word(chars[i]) {
+                i += 1;
+            }
+        }
+        i
+    }
+
+    pub fn search_move_word(&mut self, dir: i32) {
+        self.search_cursor = self.search_word_boundary(dir);
+    }
+
+    /// Cut the character range `[from, to)` (char indices) into the kill buffer.
+    fn search_kill(&mut self, from: usize, to: usize) {
+        if from >= to {
+            return;
+        }
+        let start = self.search_byte_at(from);
+        let end = self.search_byte_at(to);
+        self.kill_buffer = self.search[start..end].to_string();
+        self.search.replace_range(start..end, "");
+        self.search_cursor = self.search_cursor.min(from);
+        self.refresh_views();
+    }
+
+    pub fn search_kill_word_back(&mut self) {
+        let to = self.search_cursor;
+        let from = self.search_word_boundary(-1);
+        self.search_kill(from, to);
+    }
+    pub fn search_kill_word_forward(&mut self) {
+        let from = self.search_cursor;
+        let to = self.search_word_boundary(1);
+        self.search_kill(from, to);
+        self.search_cursor = from;
+    }
+    pub fn search_kill_to_start(&mut self) {
+        self.search_kill(0, self.search_cursor);
+    }
+    pub fn search_kill_to_end(&mut self) {
+        self.search_kill(self.search_cursor, self.search_char_len());
+    }
+
+    /// Insert the kill buffer at the cursor (Ctrl-Y).
+    pub fn search_yank(&mut self) {
+        if self.kill_buffer.is_empty() {
+            return;
+        }
+        let text = self.kill_buffer.clone();
+        let b = self.search_byte_at(self.search_cursor);
+        self.search.insert_str(b, &text);
+        self.search_cursor += text.chars().count();
         self.refresh_views();
     }
 
