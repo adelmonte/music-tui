@@ -10,7 +10,7 @@ mod scan;
 mod ui;
 
 use std::io::stdout;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{
@@ -26,6 +26,11 @@ use config::Config;
 use model::Library;
 
 fn main() -> Result<()> {
+    // Set MUSIC_TUI_TIMING=1 to print per-phase startup timings to stderr (shown
+    // on the normal screen, before the alternate screen is entered).
+    let timing = std::env::var_os("MUSIC_TUI_TIMING").is_some();
+    let t0 = Instant::now();
+
     let config = Config::load();
 
     // Load the existing index (fast startup); empty library if none yet.
@@ -33,12 +38,30 @@ fn main() -> Result<()> {
         Ok(conn) => db::load_all(&conn).map(Library::new).unwrap_or_default(),
         Err(_) => Library::default(),
     };
+    if timing {
+        eprintln!("[timing] config + db load + index : {:?}", t0.elapsed());
+    }
 
     // Detect terminal graphics capability *before* entering the alternate screen,
     // since the query talks to stdio.
+    let t = Instant::now();
     let art = Art::new();
+    if timing {
+        eprintln!("[timing] graphics query (Art::new) : {:?}", t.elapsed());
+    }
+
+    let t = Instant::now();
     let audio = Audio::new(config.crossfade_secs())?;
+    if timing {
+        eprintln!("[timing] audio device init         : {:?}", t.elapsed());
+    }
+
+    let t = Instant::now();
     let mut app = App::new(config, library, audio, art);
+    if timing {
+        eprintln!("[timing] App::new (first refresh)  : {:?}", t.elapsed());
+        eprintln!("[timing] total startup             : {:?}", t0.elapsed());
+    }
 
     let mut terminal = ratatui::init();
     execute!(stdout(), EnableMouseCapture)?;

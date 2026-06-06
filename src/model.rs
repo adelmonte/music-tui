@@ -21,16 +21,16 @@ pub struct Track {
     pub length_secs: u64,
 }
 
-impl Track {
-    fn matches(&self, q: &str) -> bool {
-        if q.is_empty() {
-            return true;
-        }
-        self.title.to_lowercase().contains(q)
-            || self.track_artist.to_lowercase().contains(q)
-            || self.album.to_lowercase().contains(q)
-            || self.album_artist.to_lowercase().contains(q)
-    }
+/// The four searchable fields, lowercased and joined with a separator that no
+/// query can contain, so `contains` over the blob matches each field
+/// independently (a query never spans two fields) — equivalent to the old
+/// per-field check but without re-lowercasing on every keystroke.
+fn search_blob(t: &Track) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        t.title, t.track_artist, t.album, t.album_artist
+    )
+    .to_lowercase()
 }
 
 /// An album as shown in column 2, identified by (album_artist, title, year).
@@ -46,11 +46,16 @@ pub struct AlbumRef {
 #[derive(Default)]
 pub struct Library {
     pub tracks: Vec<Track>,
+    /// Lowercased search blobs, parallel to `tracks` (same index), built once at
+    /// construction so per-keystroke filtering is one allocation-free `contains`.
+    /// Kept in sync by only ever building the library through `Library::new`.
+    blobs: Vec<String>,
 }
 
 impl Library {
     pub fn new(tracks: Vec<Track>) -> Self {
-        Self { tracks }
+        let blobs = tracks.iter().map(search_blob).collect();
+        Self { tracks, blobs }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -64,8 +69,9 @@ impl Library {
         let mut v: Vec<String> = self
             .tracks
             .iter()
-            .filter(|t| t.matches(query))
-            .map(|t| t.album_artist.clone())
+            .zip(&self.blobs)
+            .filter(|(_, b)| query.is_empty() || b.contains(query))
+            .map(|(t, _)| t.album_artist.clone())
             .collect();
         v.sort_by_key(|s| article_sort_key(s, sort_articles));
         v.dedup();
@@ -78,7 +84,9 @@ impl Library {
         let mut v: Vec<AlbumRef> = self
             .tracks
             .iter()
-            .filter(|t| t.matches(query))
+            .zip(&self.blobs)
+            .filter(|(_, b)| query.is_empty() || b.contains(query))
+            .map(|(t, _)| t)
             .filter(|t| artist.is_none_or(|a| t.album_artist == a))
             .map(|t| AlbumRef {
                 album_artist: t.album_artist.clone(),
@@ -105,7 +113,9 @@ impl Library {
         let mut v: Vec<Track> = self
             .tracks
             .iter()
-            .filter(|t| t.matches(query))
+            .zip(&self.blobs)
+            .filter(|(_, b)| query.is_empty() || b.contains(query))
+            .map(|(t, _)| t)
             .filter(|t| artist.is_none_or(|a| t.album_artist == a))
             .filter(|t| {
                 album.is_none_or(|al| {
