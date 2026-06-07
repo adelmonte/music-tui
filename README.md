@@ -77,6 +77,25 @@ queue to the selected playlist, `d` delete a playlist, `x` remove a track, `Ente
 Mouse: click rows, tabs, and transport buttons; drag the progress/volume bars and the
 pane dividers.
 
+## Remote control
+
+While music-tui is running, you can control it from any other terminal or bind these flags
+to media keys in your window manager:
+
+```sh
+music-tui --play-pause   # toggle play / pause
+music-tui --next         # skip to the next track
+music-tui --previous     # go to the previous track
+music-tui --volume-up    # raise volume by 5%
+music-tui --volume-down  # lower volume by 5%
+music-tui --repeat       # cycle repeat mode (off → all → one)
+music-tui --shuffle      # toggle shuffle
+```
+
+The running instance listens on a Unix domain socket
+(`$XDG_RUNTIME_DIR/music-tui.sock`, e.g. `/run/user/1000/music-tui.sock`).
+The flag invocation connects, sends the command, and exits immediately.
+
 ## Configuration
 
 Settings live in `config.toml` (path shown in the Settings tab). Edits are applied on
@@ -117,6 +136,7 @@ macOS and Windows use their respective conventions via the
 | `~/.local/share/music-tui/library.db` | SQLite index of the scanned library |
 | `~/.local/share/music-tui/playlists.toml` | saved playlists |
 | `~/.cache/music-tui/art/` | cached cover-art thumbnails (PNG) |
+| `$XDG_RUNTIME_DIR/music-tui.sock` | Unix socket for CLI remote control |
 
 Your music files are only ever read, never modified. Deleting any of the files above is
 safe: the library re-scans, playlists reset, and thumbnails regenerate on demand.

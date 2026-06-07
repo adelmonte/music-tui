@@ -4,12 +4,14 @@ mod audio;
 mod config;
 mod db;
 mod input;
+mod ipc;
 mod model;
 mod playlist;
 mod scan;
 mod ui;
 
 use std::io::stdout;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -26,6 +28,14 @@ use config::Config;
 use model::Library;
 
 fn main() -> Result<()> {
+    // Handle remote-control flags before touching the audio device or display.
+    if let Some(cmd) = ipc::parse_flag() {
+        if let Err(e) = ipc::send_cmd(cmd) {
+            eprintln!("music-tui: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     // Set MUSIC_TUI_TIMING=1 to print per-phase startup timings to stderr (shown
     // on the normal screen, before the alternate screen is entered).
     let timing = std::env::var_os("MUSIC_TUI_TIMING").is_some();
@@ -63,6 +73,8 @@ fn main() -> Result<()> {
         eprintln!("[timing] total startup             : {:?}", t0.elapsed());
     }
 
+    let cmd_rx = ipc::spawn_listener();
+
     let mut terminal = ratatui::init();
     execute!(stdout(), EnableMouseCapture)?;
     // Disambiguate modified keys (e.g. Alt+[ / Alt+]) on terminals that support
@@ -72,20 +84,26 @@ fn main() -> Result<()> {
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
 
-    let res = run(&mut terminal, &mut app);
+    let res = run(&mut terminal, &mut app, cmd_rx);
 
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(stdout(), DisableMouseCapture);
     ratatui::restore();
+    ipc::cleanup();
     res
 }
 
-fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
+fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    cmd_rx: Option<Receiver<ipc::Cmd>>,
+) -> Result<()> {
     let mut dirty = true; // always draw the first frame
     loop {
         // Poll frequently while playing/scanning so position and progress stay
-        // current; drop to a long sleep when idle — events still wake us instantly.
-        let poll_ms = if app.audio.is_playing() || app.scanning.is_some() { 100 } else { 500 };
+        // current; also stay responsive when remote commands may arrive.
+        let poll_ms =
+            if app.audio.is_playing() || app.scanning.is_some() || cmd_rx.is_some() { 100 } else { 500 };
         let had_event = if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => input::handle_key(app, k),
@@ -101,9 +119,21 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
             false
         };
 
+        // Drain any incoming remote commands, treating each like a keypress.
+        let had_cmd = if let Some(rx) = &cmd_rx {
+            let mut any = false;
+            while let Ok(cmd) = rx.try_recv() {
+                dispatch_cmd(app, cmd);
+                any = true;
+            }
+            any
+        } else {
+            false
+        };
+
         let tick_dirty = app.on_tick();
 
-        if dirty || had_event || tick_dirty {
+        if dirty || had_event || had_cmd || tick_dirty {
             terminal.draw(|f| ui::draw(f, app))?;
             dirty = false;
         }
@@ -113,4 +143,16 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn dispatch_cmd(app: &mut App, cmd: ipc::Cmd) {
+    match cmd {
+        ipc::Cmd::PlayPause => app.toggle_pause(),
+        ipc::Cmd::Next => app.next_track(true),
+        ipc::Cmd::Previous => app.prev_track(),
+        ipc::Cmd::VolumeUp => app.volume_up(),
+        ipc::Cmd::VolumeDown => app.volume_down(),
+        ipc::Cmd::Repeat => app.cycle_repeat(),
+        ipc::Cmd::Shuffle => app.toggle_shuffle(),
+    }
 }
