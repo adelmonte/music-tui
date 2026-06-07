@@ -2,7 +2,7 @@
 
 ![music-tui screenshot](demo.png)
 
-A keyboard- and mouse-driven terminal music player built with [ratatui](https://ratatui.rs).
+A keyboard and mouse-driven terminal music player built with [ratatui](https://ratatui.rs).
 It scans a local music library, browses it by album artist / album / track, manages a
 play queue and playlists, and plays audio with optional gapless crossfade. In
 [kitty](https://sw.kovidgoyal.net/kitty/) it also renders album art and oversized
