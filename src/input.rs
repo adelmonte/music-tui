@@ -116,6 +116,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Char('c') => app.toggle_cache_all_art(),
             KeyCode::Char('t') => app.toggle_sort_articles(),
             KeyCode::Char('k') => app.toggle_big_icons(),
+            KeyCode::Char('v') => app.toggle_album_thumbnails(),
             KeyCode::Char('+') | KeyCode::Char('=') => app.adjust_gapless(0.5),
             KeyCode::Char('-') | KeyCode::Char('_') => app.adjust_gapless(-0.5),
             _ => {}

@@ -40,6 +40,9 @@ pub struct UiConfig {
     /// sorts and displays as "Doors, The".
     #[serde(default = "default_true")]
     pub sort_articles: bool,
+    /// Show a small cover thumbnail next to every album in the Albums column.
+    #[serde(default = "default_true")]
+    pub show_album_thumbnails: bool,
 }
 
 fn default_true() -> bool {
@@ -52,6 +55,7 @@ impl Default for UiConfig {
             big_transport_icons: default_true(),
             cache_all_art: false,
             sort_articles: true,
+            show_album_thumbnails: default_true(),
         }
     }
 }
@@ -157,7 +161,9 @@ big_transport_icons = true\n\
 # Pre-cache all cover-art thumbnails in the background.\n\
 cache_all_art = false\n\
 # Display \"The Doors\" as \"Doors, The\" and sort accordingly.\n\
-sort_articles = true\n";
+sort_articles = true\n\
+# Show a small cover thumbnail next to every album in the Albums column.\n\
+show_album_thumbnails = true\n";
 
 impl Default for Config {
     fn default() -> Self {
@@ -391,6 +397,11 @@ impl Config {
             }
             if ui.get("sort_articles").and_then(|i| i.as_bool()) != Some(self.ui.sort_articles) {
                 ui["sort_articles"] = toml_edit::value(self.ui.sort_articles);
+            }
+            if ui.get("show_album_thumbnails").and_then(|i| i.as_bool())
+                != Some(self.ui.show_album_thumbnails)
+            {
+                ui["show_album_thumbnails"] = toml_edit::value(self.ui.show_album_thumbnails);
             }
         }
 

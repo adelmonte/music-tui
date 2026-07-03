@@ -1,7 +1,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Bar, BarChart, BarGroup, Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap,
 };
@@ -206,20 +206,34 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
         t,
     );
 
-    // Column 2: albums by year.
+    // Column 2: albums by year. When thumbnails are on, each row grows to two
+    // lines (cover + title, blank spacer) and reserves `ALBUM_THUMB_COLS` on the
+    // left for the image, drawn separately in `draw_album_thumbnails` after this
+    // list (List/ListItem only draws text).
+    let show_thumbs = app.show_album_thumbnails;
+    let indent = " ".repeat(ALBUM_THUMB_COLS as usize + 1);
     let items: Vec<ListItem> = app
         .view_albums
         .iter()
         .enumerate()
         .map(|(i, al)| {
+            let mut spans = if show_thumbs {
+                vec![Span::raw(indent.clone())]
+            } else {
+                Vec::new()
+            };
             if i == 0 {
-                ListItem::new(Span::raw("All"))
+                spans.push(Span::raw("All"));
             } else {
                 let year = al.year.map(|y| y.to_string()).unwrap_or_else(|| "----".into());
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("[{year}] "), Style::default().fg(t.muted)),
-                    Span::raw(strip_year_bracket(&al.title).to_string()),
-                ]))
+                spans.push(Span::styled(format!("[{year}] "), Style::default().fg(t.muted)));
+                spans.push(Span::raw(strip_year_bracket(&al.title).to_string()));
+            }
+            let line = Line::from(spans);
+            if show_thumbs {
+                ListItem::new(Text::from(vec![line, Line::raw("")]))
+            } else {
+                ListItem::new(line)
             }
         })
         .collect();
@@ -233,6 +247,9 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
         &mut app.rects.albums,
         t,
     );
+    if show_thumbs {
+        draw_album_thumbnails(f, app);
+    }
 
     // Column 3: tracks (top) + queue (resizable bottom share).
     let qp = app.queue_pct;
@@ -328,6 +345,35 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// Columns reserved at the left of each Albums row for its cover thumbnail.
+const ALBUM_THUMB_COLS: u16 = 4;
+
+/// Overlays a small cover image on each Albums-column row currently scrolled
+/// into view (the `List` widget itself only draws text). Only draws rows
+/// `App::request_visible_row_thumbs` would also consider in-view, and skips
+/// any row whose thumbnail hasn't finished decoding yet — it simply shows
+/// blank until the next frame it's ready, same as the now-playing cover does.
+fn draw_album_thumbnails(f: &mut Frame, app: &mut App) {
+    let area = app.rects.albums;
+    let row_h = App::ALBUM_ROW_HEIGHT;
+    if area.height < row_h || area.width <= ALBUM_THUMB_COLS {
+        return;
+    }
+    let visible = (area.height / row_h) as usize;
+    let offset = app.album_state.offset();
+    let end = (offset + visible).min(app.view_albums.len());
+    for row_i in offset..end {
+        let album = app.view_albums[row_i].clone();
+        let Some(proto) = app.row_thumb_cache.get_mut(&album) else {
+            continue;
+        };
+        let y = area.y + ((row_i - offset) as u16) * row_h;
+        let rect = Rect::new(area.x, y, ALBUM_THUMB_COLS, row_h);
+        let img = StatefulImage::default().resize(Resize::Fit(None));
+        f.render_stateful_widget(img, rect, proto);
+    }
+}
+
 fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
     let t = app.theme;
     let block = titled(" Settings ", false, t);
@@ -376,6 +422,7 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
         val("Cache all album art",      on_off(app.cache_all_art)),
         val("Sort \"The\" artists",     on_off(app.config.ui.sort_articles)),
         val("Big transport icons",      on_off(app.big_icons)),
+        val("Album thumbnails",         on_off(app.show_album_thumbnails)),
         Line::raw(""),
         Line::from("  e    edit music directory path").fg(t.muted),
         Line::from("  r    rescan library").fg(t.muted),
@@ -383,6 +430,7 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
         Line::from("  c    cache all album art").fg(t.muted),
         Line::from("  t    sort \"The\" artists").fg(t.muted),
         Line::from("  k    big transport icons").fg(t.muted),
+        Line::from("  v    album thumbnails").fg(t.muted),
         Line::raw(""),
         Line::from(format!("  config: {}", crate::config::config_path_display())).fg(t.muted),
     ];

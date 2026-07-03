@@ -34,7 +34,7 @@ fn search_blob(t: &Track) -> String {
 }
 
 /// An album as shown in column 2, identified by (album_artist, title, year).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AlbumRef {
     pub album_artist: String,
     pub title: String,
@@ -101,6 +101,14 @@ impl Library {
         });
         v.dedup();
         v
+    }
+
+    /// A representative track for an album (first match by artist+title+year),
+    /// used to source cover art for the Albums-column thumbnail.
+    pub fn album_cover_track(&self, album: &AlbumRef) -> Option<&Track> {
+        self.tracks.iter().find(|t| {
+            t.album == album.title && t.album_artist == album.album_artist && t.year == album.year
+        })
     }
 
     /// Tracks (column 3) filtered by the current artist/album selection and search.

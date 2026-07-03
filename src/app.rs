@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
@@ -109,6 +109,15 @@ struct ArtMsg {
     image: Option<DynamicImage>,
 }
 
+/// A decoded, row-thumbnail-sized cover for the Albums column, tagged with the
+/// album it belongs to. Kept on a channel separate from `ArtMsg` (own thread,
+/// own cache) since it's a different-shaped background job — one image per
+/// visible row rather than one for the whole app.
+struct RowThumbMsg {
+    album: AlbumRef,
+    image: Option<DynamicImage>,
+}
+
 /// Layout rectangles recorded each frame so the input layer can hit-test mouse
 /// clicks. The list rects are the *inner* content areas (inside borders).
 #[derive(Default, Clone)]
@@ -163,6 +172,8 @@ pub struct App {
     pub queue_pct: u16,
     /// Whether all-library art pre-caching is enabled.
     pub cache_all_art: bool,
+    /// Whether the Albums column shows a per-row cover thumbnail.
+    pub show_album_thumbnails: bool,
     pub search: String,
     /// Cursor position within `search`, as a character index (0..=char count).
     pub search_cursor: usize,
@@ -226,6 +237,18 @@ pub struct App {
     /// rebuilds its art instantly instead of re-decoding.
     art_cache: HashMap<PathBuf, DynamicImage>,
 
+    /// Render protocols for the Albums-column row thumbnails, keyed by album so
+    /// scrolling back to a previously-seen row is instant.
+    pub row_thumb_cache: HashMap<AlbumRef, StatefulProtocol>,
+    /// Albums with a thumbnail request already in flight, so scrolling back and
+    /// forth doesn't queue duplicate decodes.
+    row_thumb_inflight: HashSet<AlbumRef>,
+    /// Albums confirmed to have no embedded cover, so they aren't re-requested
+    /// (and re-decoded from disk) on every tick they stay in view.
+    row_thumb_no_art: HashSet<AlbumRef>,
+    row_thumb_tx: Sender<RowThumbMsg>,
+    row_thumb_rx: Receiver<RowThumbMsg>,
+
     rng: u64,
     scan_rx: Option<Receiver<ScanMsg>>,
 }
@@ -242,8 +265,10 @@ impl App {
         let queue_pct = config.validated_queue_pct();
         let big_icons = config.ui.big_transport_icons;
         let cache_all_art = config.ui.cache_all_art;
+        let show_album_thumbnails = config.ui.show_album_thumbnails;
         let playlists = playlist::load();
         let (art_tx, art_rx) = channel::<ArtMsg>();
+        let (row_thumb_tx, row_thumb_rx) = channel::<RowThumbMsg>();
         let mut app = App {
             config,
             theme,
@@ -258,6 +283,7 @@ impl App {
             big_icons,
             queue_pct,
             cache_all_art,
+            show_album_thumbnails,
             search: String::new(),
             search_cursor: 0,
             kill_buffer: String::new(),
@@ -296,6 +322,11 @@ impl App {
             art_tx,
             art_rx,
             art_cache: HashMap::new(),
+            row_thumb_cache: HashMap::new(),
+            row_thumb_inflight: HashSet::new(),
+            row_thumb_no_art: HashSet::new(),
+            row_thumb_tx,
+            row_thumb_rx,
             rng: seed,
             scan_rx: None,
         };
@@ -758,6 +789,81 @@ impl App {
         }
     }
 
+    /// Number of text rows each Albums-column row occupies (thumbnail + title on
+    /// row 1, blank spacer on row 2). Shared by the row-position math in
+    /// `ui::draw_body` and the viewport calc below, so they never drift apart.
+    pub const ALBUM_ROW_HEIGHT: u16 = 2;
+
+    /// Kick off background decodes for Albums-column thumbnails scrolled into
+    /// view. Capped per call so a fast PageDown/End jump doesn't burst-spawn a
+    /// thread per album at once — the rest catch up over the following ticks.
+    fn request_visible_row_thumbs(&mut self) {
+        if !self.show_album_thumbnails || !self.art.available() {
+            return;
+        }
+        const MAX_NEW_PER_TICK: usize = 4;
+        let area = self.rects.albums;
+        if area.height == 0 {
+            return;
+        }
+        let visible = (area.height / Self::ALBUM_ROW_HEIGHT).max(1) as usize;
+        let offset = self.album_state.offset();
+        let mut spawned = 0;
+        for album in self.view_albums.iter().skip(offset).take(visible) {
+            if spawned >= MAX_NEW_PER_TICK {
+                break;
+            }
+            // The synthetic "All" row (index 0) has no single cover.
+            if album.album_artist.is_empty() && album.year.is_none() && album.title == "All" {
+                continue;
+            }
+            if self.row_thumb_cache.contains_key(album)
+                || self.row_thumb_inflight.contains(album)
+                || self.row_thumb_no_art.contains(album)
+            {
+                continue;
+            }
+            let Some(track) = self.library.album_cover_track(album) else {
+                continue;
+            };
+            let path = track.path.clone();
+            let album = album.clone();
+            self.row_thumb_inflight.insert(album.clone());
+            let tx = self.row_thumb_tx.clone();
+            std::thread::spawn(move || {
+                let image = load_cover_cached(&path)
+                    .map(|img| img.resize(128, 128, image::imageops::FilterType::Triangle));
+                let _ = tx.send(RowThumbMsg { album, image });
+            });
+            spawned += 1;
+        }
+    }
+
+    /// Drain decoded row thumbnails and build their render protocols. Returns
+    /// true if anything changed, so the caller knows to redraw.
+    fn poll_row_thumb(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(msg) = self.row_thumb_rx.try_recv() {
+            self.row_thumb_inflight.remove(&msg.album);
+            match msg.image.and_then(|img| self.art.protocol_from_image(img)) {
+                Some(proto) => {
+                    if self.row_thumb_cache.len() > 256 {
+                        self.row_thumb_cache.clear();
+                    }
+                    self.row_thumb_cache.insert(msg.album, proto);
+                    changed = true;
+                }
+                None => {
+                    if self.row_thumb_no_art.len() > 1024 {
+                        self.row_thumb_no_art.clear();
+                    }
+                    self.row_thumb_no_art.insert(msg.album);
+                }
+            }
+        }
+        changed
+    }
+
     /// Pixel dimensions of the current cover, so the popup box can match the
     /// album's aspect ratio (covers aren't always square).
     pub fn popup_art_size(&self) -> Option<(u32, u32)> {
@@ -1126,6 +1232,17 @@ impl App {
         }
     }
 
+    pub fn toggle_album_thumbnails(&mut self) {
+        self.show_album_thumbnails = !self.show_album_thumbnails;
+        self.config.ui.show_album_thumbnails = self.show_album_thumbnails;
+        let _ = self.config.save();
+        if !self.show_album_thumbnails {
+            self.row_thumb_cache.clear();
+            self.row_thumb_inflight.clear();
+            self.row_thumb_no_art.clear();
+        }
+    }
+
     /// Build cover thumbnails for the whole library on a background thread so
     /// they're cached on disk and load instantly later.
     pub fn start_art_precache(&self) {
@@ -1330,6 +1447,11 @@ impl App {
     pub fn on_tick(&mut self) -> bool {
         self.poll_scan();
         self.poll_art();
+        let mut row_thumbs_dirty = false;
+        if self.tab == Tab::Browser {
+            self.request_visible_row_thumbs();
+            row_thumbs_dirty = self.poll_row_thumb();
+        }
         self.audio.update();
 
         // Start an automatic crossfade into the next track near the end.
@@ -1352,8 +1474,8 @@ impl App {
 
         // The art popup is static; don't re-render it on every tick (each kitty
         // re-placement of a large image is wasteful). Events still redraw.
-        let mut dirty =
-            !self.show_art_popup && (self.audio.is_playing() || self.scanning.is_some());
+        let mut dirty = row_thumbs_dirty
+            || (!self.show_art_popup && (self.audio.is_playing() || self.scanning.is_some()));
         // Revert an expired transient message back to the now-playing line.
         if let Some(until) = self.notify_until
             && Instant::now() >= until {
