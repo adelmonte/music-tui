@@ -199,12 +199,14 @@ fn hit(rect: Rect, x: u16, y: u16) -> bool {
     rect.contains(Position { x, y })
 }
 
-/// Map a row click inside a list's inner rect to an item index, honoring scroll.
-fn row_index(rect: Rect, state: &ListState, y: u16, len: usize) -> Option<usize> {
-    if len == 0 || y < rect.y {
+/// Map a row click inside a list's inner rect to an item index, honoring scroll
+/// and each row's height in text lines (most lists are 1; the Albums column is
+/// 2 when thumbnails are on — see `App::ALBUM_ROW_HEIGHT`).
+fn row_index(rect: Rect, state: &ListState, y: u16, len: usize, row_h: u16) -> Option<usize> {
+    if len == 0 || y < rect.y || row_h == 0 {
         return None;
     }
-    let idx = state.offset() + (y - rect.y) as usize;
+    let idx = state.offset() + ((y - rect.y) / row_h) as usize;
     if idx < len { Some(idx) } else { None }
 }
 
@@ -399,14 +401,14 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     if app.tab == Tab::Playlists {
         if hit(r.pl_list, x, y) {
             app.pl_set_pane(crate::app::PlPane::List);
-            if let Some(i) = row_index(r.pl_list, &app.playlist_state, y, app.playlists.len()) {
+            if let Some(i) = row_index(r.pl_list, &app.playlist_state, y, app.playlists.len(), 1) {
                 app.playlist_state.select(Some(i));
                 app.pl_move(0); // refresh track-pane selection
             }
         } else if hit(r.pl_tracks, x, y) {
             app.pl_set_pane(crate::app::PlPane::Tracks);
             let n = app.selected_playlist().map(|p| p.tracks.len()).unwrap_or(0);
-            if let Some(i) = row_index(r.pl_tracks, &app.pl_track_state, y, n) {
+            if let Some(i) = row_index(r.pl_tracks, &app.pl_track_state, y, n, 1) {
                 app.pl_track_state.select(Some(i));
             }
         }
@@ -437,7 +439,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     // Column rows.
     if hit(r.artists, x, y) {
         app.set_focus(Focus::Artists);
-        if let Some(i) = row_index(r.artists, &app.artist_state, y, app.view_artists.len()) {
+        if let Some(i) = row_index(r.artists, &app.artist_state, y, app.view_artists.len(), 1) {
             app.artist_state.select(Some(i));
             app.refresh_views();
         }
@@ -448,7 +450,8 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     }
     if hit(r.albums, x, y) {
         app.set_focus(Focus::Albums);
-        if let Some(i) = row_index(r.albums, &app.album_state, y, app.view_albums.len()) {
+        let row_h = if app.show_album_thumbnails { App::ALBUM_ROW_HEIGHT } else { 1 };
+        if let Some(i) = row_index(r.albums, &app.album_state, y, app.view_albums.len(), row_h) {
             app.album_state.select(Some(i));
             app.refresh_views();
         }
@@ -459,7 +462,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     }
     if hit(r.tracks, x, y) {
         app.set_focus(Focus::Tracks);
-        if let Some(i) = row_index(r.tracks, &app.track_state, y, app.view_tracks.len()) {
+        if let Some(i) = row_index(r.tracks, &app.track_state, y, app.view_tracks.len(), 1) {
             app.track_state.select(Some(i));
         }
         if double {
@@ -469,7 +472,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     }
     if hit(r.queue, x, y) {
         app.set_focus(Focus::Queue);
-        if let Some(i) = row_index(r.queue, &app.queue_state, y, app.queue.len()) {
+        if let Some(i) = row_index(r.queue, &app.queue_state, y, app.queue.len(), 1) {
             app.queue_state.select(Some(i));
         }
         if double {
