@@ -729,9 +729,22 @@ impl App {
         let Some(track) = self.queue.get(i).cloned() else {
             return;
         };
+        // Crossfade into manually-picked tracks too (Enter, next/prev, IPC),
+        // not just the automatic near-end handoff in `on_tick`. Skip it when
+        // replaying the same index (e.g. "previous" restarting the current
+        // track) since fading a track into itself just phases with its own tail.
+        let want_crossfade = self.now != Some(i)
+            && self.audio.is_playing()
+            && self.audio.crossfade_secs() > 0.0
+            && (track.length_secs as f32) > self.audio.crossfade_secs();
         self.now = Some(i);
         self.queue_state.select(Some(i));
-        match self.audio.play(&track.path, track.length_secs) {
+        let result = if want_crossfade && self.audio.crossfade_to(&track.path, track.length_secs) {
+            Ok(())
+        } else {
+            self.audio.play(&track.path, track.length_secs)
+        };
+        match result {
             Ok(()) => {
                 self.set_now_playing(&track);
                 self.request_art(track.path.clone());
