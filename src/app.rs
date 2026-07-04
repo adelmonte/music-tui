@@ -100,6 +100,19 @@ pub enum Drag {
     ColDivider(usize),
     /// Resizing the tracks/queue split in the third column.
     QueueDivider,
+    /// Scrubbing a column's scrollbar thumb.
+    Scroll(ScrollList),
+}
+
+/// Which scrollable list a `Drag::Scroll` is scrubbing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollList {
+    Artists,
+    Albums,
+    Tracks,
+    Queue,
+    PlList,
+    PlTracks,
 }
 
 /// A decoded cover image returned from the background art worker, tagged with
@@ -402,18 +415,38 @@ impl App {
     }
 
     pub fn move_selection(&mut self, delta: i32) {
-        let (state, len) = match self.focus {
-            Focus::Artists => (&mut self.artist_state, self.view_artists.len()),
-            Focus::Albums => (&mut self.album_state, self.view_albums.len()),
-            Focus::Tracks => (&mut self.track_state, self.view_tracks.len()),
-            Focus::Queue => (&mut self.queue_state, self.queue.len()),
+        let album_row_h = if self.show_album_thumbnails { Self::ALBUM_ROW_HEIGHT } else { 1 };
+        let (state, len, rect, row_h) = match self.focus {
+            Focus::Artists => (&mut self.artist_state, self.view_artists.len(), self.rects.artists, 1),
+            Focus::Albums => (&mut self.album_state, self.view_albums.len(), self.rects.albums, album_row_h),
+            Focus::Tracks => (&mut self.track_state, self.view_tracks.len(), self.rects.tracks, 1),
+            Focus::Queue => (&mut self.queue_state, self.queue.len(), self.rects.queue, 1),
             _ => return,
         };
         move_state(state, len, delta);
+        scroll_into_view(state, (rect.height / row_h) as usize);
         // Moving the artist or album highlight re-derives the columns to the right.
         if matches!(self.focus, Focus::Artists | Focus::Albums) {
             self.refresh_views();
         }
+    }
+
+    /// Directly pan a list's viewport, independent of its current selection —
+    /// used while a scrollbar thumb is being dragged (see `ScrollList` /
+    /// `Drag::Scroll` in input.rs). Deliberately does not touch `selected`:
+    /// dragging the scrollbar should only change what's visible, not which
+    /// row is selected/filtering-on (an Artists/Albums drag shouldn't
+    /// re-filter the columns to the right just because you scrolled past).
+    pub fn scroll_offset(&mut self, target: ScrollList, offset: usize) {
+        let state = match target {
+            ScrollList::Artists => &mut self.artist_state,
+            ScrollList::Albums => &mut self.album_state,
+            ScrollList::Tracks => &mut self.track_state,
+            ScrollList::Queue => &mut self.queue_state,
+            ScrollList::PlList => &mut self.playlist_state,
+            ScrollList::PlTracks => &mut self.pl_track_state,
+        };
+        *state.offset_mut() = offset;
     }
 
     pub fn move_column(&mut self, right: bool) {
@@ -682,6 +715,7 @@ impl App {
         self.queue.extend(to_add);
         if self.queue_state.selected().is_none() {
             self.queue_state.select(Some(0));
+            scroll_into_view(&mut self.queue_state, self.rects.queue.height as usize);
         }
         self.notify(format!("Added {n} track(s) to queue."));
     }
@@ -706,6 +740,7 @@ impl App {
             self.queue_state.select(None);
         } else {
             self.queue_state.select(Some(i.min(self.queue.len() - 1)));
+            scroll_into_view(&mut self.queue_state, self.rects.queue.height as usize);
         }
         self.notify("Removed from queue.");
     }
@@ -739,6 +774,7 @@ impl App {
             && (track.length_secs as f32) > self.audio.crossfade_secs();
         self.now = Some(i);
         self.queue_state.select(Some(i));
+        scroll_into_view(&mut self.queue_state, self.rects.queue.height as usize);
         let result = if want_crossfade && self.audio.crossfade_to(&track.path, track.length_secs) {
             Ok(())
         } else {
@@ -1290,6 +1326,7 @@ impl App {
         match self.pl_focus {
             PlPane::List => {
                 move_state(&mut self.playlist_state, self.playlists.len(), delta);
+                scroll_into_view(&mut self.playlist_state, self.rects.pl_list.height as usize);
                 let sel = self.playlist_state.selected().unwrap_or(0);
                 let has = self
                     .playlists
@@ -1297,6 +1334,7 @@ impl App {
                     .map(|p| !p.tracks.is_empty())
                     .unwrap_or(false);
                 self.pl_track_state.select(if has { Some(0) } else { None });
+                scroll_into_view(&mut self.pl_track_state, self.rects.pl_tracks.height as usize);
             }
             PlPane::Tracks => {
                 let n = self
@@ -1306,6 +1344,7 @@ impl App {
                     .map(|p| p.tracks.len())
                     .unwrap_or(0);
                 move_state(&mut self.pl_track_state, n, delta);
+                scroll_into_view(&mut self.pl_track_state, self.rects.pl_tracks.height as usize);
             }
         }
     }
@@ -1368,6 +1407,7 @@ impl App {
         });
         playlist::save(&self.playlists);
         self.playlist_state.select(Some(self.playlists.len() - 1));
+        scroll_into_view(&mut self.playlist_state, self.rects.pl_list.height as usize);
         self.clamp_pl_states();
         self.status = format!("Saved playlist '{name}' ({n} tracks).");
     }
@@ -1476,6 +1516,7 @@ impl App {
                 {
                     self.now = Some(i);
                     self.queue_state.select(Some(i));
+                    scroll_into_view(&mut self.queue_state, self.rects.queue.height as usize);
                     self.set_now_playing(&track);
                     self.request_art(track.path.clone());
                 }
@@ -1587,4 +1628,24 @@ fn move_state(state: &mut ListState, len: usize, delta: i32) {
     let cur = state.selected().unwrap_or(0) as i32;
     let new = (cur + delta).clamp(0, len as i32 - 1);
     state.select(Some(new as usize));
+}
+
+/// Nudge `state`'s offset so its selection stays within a `visible`-row
+/// window. `render_list` (ui.rs) no longer lets `List` auto-scroll to follow
+/// the selection on every render — that auto-follow is exactly what fought a
+/// scrollbar-drag trying to pan the view independent of the current
+/// selection — so anything that moves `selected` via a non-click path (arrow
+/// keys, jumping to the end of a list, auto-advance) needs to restore that
+/// "keep it visible" behavior explicitly.
+fn scroll_into_view(state: &mut ListState, visible: usize) {
+    if visible == 0 {
+        return;
+    }
+    let Some(sel) = state.selected() else { return };
+    let offset = state.offset();
+    if sel < offset {
+        *state.offset_mut() = sel;
+    } else if sel >= offset + visible {
+        *state.offset_mut() = sel + 1 - visible;
+    }
 }

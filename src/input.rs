@@ -4,7 +4,7 @@ use crossterm::event::{
 use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 
-use crate::app::{App, Drag, Focus, Tab};
+use crate::app::{App, Drag, Focus, ScrollList, Tab};
 
 /// Translate a key press into app state changes. Modal: help overlay, search
 /// field, and library-path editing each capture input first.
@@ -210,6 +210,32 @@ fn row_index(rect: Rect, state: &ListState, y: u16, len: usize, row_h: u16) -> O
     if idx < len { Some(idx) } else { None }
 }
 
+/// The rightmost column of a list's rect — where `render_list` draws its
+/// scrollbar thumb (see ui.rs). Dedicated to scrubbing rather than row
+/// selection since it's a 1-cell gap left of any actual row content.
+fn scrollbar_col(rect: Rect) -> u16 {
+    rect.x + rect.width.saturating_sub(1)
+}
+
+/// Map a y position to a scroll offset proportional across the whole list —
+/// used while a scrollbar thumb is being dragged. Bounded to
+/// `0..=len.saturating_sub(visible)` so the ends of the track line up with
+/// the very top/bottom of the list, matching where the thumb itself is drawn
+/// (`ScrollbarState`'s own position math, in ui.rs).
+fn scroll_offset_at(rect: Rect, y: u16, len: usize) -> Option<usize> {
+    if len == 0 || rect.height == 0 {
+        return None;
+    }
+    let visible = rect.height as usize;
+    let max_offset = len.saturating_sub(visible);
+    if max_offset == 0 {
+        return Some(0);
+    }
+    let span = (rect.height as f64 - 1.0).max(1.0);
+    let rel = (y as i32 - rect.y as i32).clamp(0, span as i32) as f64;
+    Some(((rel / span) * max_offset as f64).round() as usize)
+}
+
 /// Translate a mouse event into app state changes using the per-frame rects.
 pub fn handle_mouse(app: &mut App, ev: MouseEvent) {
     let (x, y) = (ev.column, ev.row);
@@ -262,7 +288,29 @@ fn handle_drag(app: &mut App, x: u16, y: u16) {
         Some(Drag::Volume) => app.set_volume(vol_frac(app.rects.volume, y)),
         Some(Drag::ColDivider(i)) => app.drag_divider(i, x),
         Some(Drag::QueueDivider) => app.drag_queue_divider(y),
+        Some(Drag::Scroll(target)) => scroll_drag(app, target, y),
         None => {}
+    }
+}
+
+/// Pan a list's viewport to the row under `y`, scaled across the whole list,
+/// while a scrollbar thumb is being dragged. Never touches selection — see
+/// `App::scroll_offset`.
+fn scroll_drag(app: &mut App, target: ScrollList, y: u16) {
+    let r = app.rects.clone();
+    let hit = match target {
+        ScrollList::Artists => scroll_offset_at(r.artists, y, app.view_artists.len()),
+        ScrollList::Albums => scroll_offset_at(r.albums, y, app.view_albums.len()),
+        ScrollList::Tracks => scroll_offset_at(r.tracks, y, app.view_tracks.len()),
+        ScrollList::Queue => scroll_offset_at(r.queue, y, app.queue.len()),
+        ScrollList::PlList => scroll_offset_at(r.pl_list, y, app.playlists.len()),
+        ScrollList::PlTracks => {
+            let n = app.selected_playlist().map(|p| p.tracks.len()).unwrap_or(0);
+            scroll_offset_at(r.pl_tracks, y, n)
+        }
+    };
+    if let Some(offset) = hit {
+        app.scroll_offset(target, offset);
     }
 }
 
@@ -401,6 +449,13 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     if app.tab == Tab::Playlists {
         if hit(r.pl_list, x, y) {
             app.pl_set_pane(crate::app::PlPane::List);
+            if x == scrollbar_col(r.pl_list) {
+                app.dragging = Some(Drag::Scroll(ScrollList::PlList));
+                if let Some(offset) = scroll_offset_at(r.pl_list, y, app.playlists.len()) {
+                    app.scroll_offset(ScrollList::PlList, offset);
+                }
+                return;
+            }
             if let Some(i) = row_index(r.pl_list, &app.playlist_state, y, app.playlists.len(), 1) {
                 app.playlist_state.select(Some(i));
                 app.pl_move(0); // refresh track-pane selection
@@ -408,6 +463,13 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
         } else if hit(r.pl_tracks, x, y) {
             app.pl_set_pane(crate::app::PlPane::Tracks);
             let n = app.selected_playlist().map(|p| p.tracks.len()).unwrap_or(0);
+            if x == scrollbar_col(r.pl_tracks) {
+                app.dragging = Some(Drag::Scroll(ScrollList::PlTracks));
+                if let Some(offset) = scroll_offset_at(r.pl_tracks, y, n) {
+                    app.scroll_offset(ScrollList::PlTracks, offset);
+                }
+                return;
+            }
             if let Some(i) = row_index(r.pl_tracks, &app.pl_track_state, y, n, 1) {
                 app.pl_track_state.select(Some(i));
             }
@@ -439,6 +501,13 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     // Column rows.
     if hit(r.artists, x, y) {
         app.set_focus(Focus::Artists);
+        if x == scrollbar_col(r.artists) {
+            app.dragging = Some(Drag::Scroll(ScrollList::Artists));
+            if let Some(offset) = scroll_offset_at(r.artists, y, app.view_artists.len()) {
+                app.scroll_offset(ScrollList::Artists, offset);
+            }
+            return;
+        }
         if let Some(i) = row_index(r.artists, &app.artist_state, y, app.view_artists.len(), 1) {
             app.artist_state.select(Some(i));
             app.refresh_views();
@@ -450,6 +519,13 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     }
     if hit(r.albums, x, y) {
         app.set_focus(Focus::Albums);
+        if x == scrollbar_col(r.albums) {
+            app.dragging = Some(Drag::Scroll(ScrollList::Albums));
+            if let Some(offset) = scroll_offset_at(r.albums, y, app.view_albums.len()) {
+                app.scroll_offset(ScrollList::Albums, offset);
+            }
+            return;
+        }
         let row_h = if app.show_album_thumbnails { App::ALBUM_ROW_HEIGHT } else { 1 };
         if let Some(i) = row_index(r.albums, &app.album_state, y, app.view_albums.len(), row_h) {
             app.album_state.select(Some(i));
@@ -462,6 +538,13 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     }
     if hit(r.tracks, x, y) {
         app.set_focus(Focus::Tracks);
+        if x == scrollbar_col(r.tracks) {
+            app.dragging = Some(Drag::Scroll(ScrollList::Tracks));
+            if let Some(offset) = scroll_offset_at(r.tracks, y, app.view_tracks.len()) {
+                app.scroll_offset(ScrollList::Tracks, offset);
+            }
+            return;
+        }
         if let Some(i) = row_index(r.tracks, &app.track_state, y, app.view_tracks.len(), 1) {
             app.track_state.select(Some(i));
         }
@@ -472,6 +555,13 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     }
     if hit(r.queue, x, y) {
         app.set_focus(Focus::Queue);
+        if x == scrollbar_col(r.queue) {
+            app.dragging = Some(Drag::Scroll(ScrollList::Queue));
+            if let Some(offset) = scroll_offset_at(r.queue, y, app.queue.len()) {
+                app.scroll_offset(ScrollList::Queue, offset);
+            }
+            return;
+        }
         if let Some(i) = row_index(r.queue, &app.queue_state, y, app.queue.len(), 1) {
             app.queue_state.select(Some(i));
         }

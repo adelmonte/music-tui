@@ -3,7 +3,8 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Bar, BarChart, BarGroup, Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap,
+    Bar, BarChart, BarGroup, Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Wrap,
 };
 use ratatui::Frame;
 use ratatui_image::{Resize, StatefulImage};
@@ -204,6 +205,7 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
         app.focus == Focus::Artists,
         &mut app.rects.artists,
         t,
+        1,
     );
 
     // Column 2: albums by year. When thumbnails are on, each row grows to two
@@ -246,6 +248,7 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
         app.focus == Focus::Albums,
         &mut app.rects.albums,
         t,
+        if show_thumbs { App::ALBUM_ROW_HEIGHT } else { 1 },
     );
     if show_thumbs {
         draw_album_thumbnails(f, app);
@@ -312,6 +315,7 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
         app.focus == Focus::Tracks,
         &mut app.rects.tracks,
         t,
+        1,
     );
 
     // Queue.
@@ -342,6 +346,7 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
         app.focus == Focus::Queue,
         &mut app.rects.queue,
         t,
+        1,
     );
 }
 
@@ -462,6 +467,7 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
         list_focused,
         &mut app.rects.pl_list,
         t,
+        1,
     );
 
     let pl_tracks: Vec<crate::model::Track> = app
@@ -492,6 +498,7 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
         tracks_focused,
         &mut app.rects.pl_tracks,
         t,
+        1,
     );
 
     // Naming prompt for a new playlist.
@@ -893,9 +900,12 @@ fn render_list(
     focused: bool,
     rect_out: &mut Rect,
     t: Theme,
+    row_h: u16,
 ) {
     let block = titled(title, focused, t);
-    *rect_out = block.inner(area);
+    let inner = block.inner(area);
+    *rect_out = inner;
+    f.render_widget(block, area);
     // Both states set an explicit bg + fg so the whole selected row reads as one
     // uniform bar; relying on REVERSED instead would swap each span's own color
     // into the background, tinting differently-colored columns unevenly.
@@ -907,11 +917,51 @@ fn render_list(
     } else {
         Style::default().bg(t.muted).fg(t.selection_fg)
     };
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(highlight)
-        .highlight_symbol("");
-    f.render_stateful_widget(list, area, state);
+    let len = items.len();
+    let list = List::new(items).highlight_style(highlight).highlight_symbol("");
+    // Stop the highlighted row 1 cell short of the border: List fills the
+    // whole area it's given with the highlight bg, so rendering into the
+    // full inner rect would run the bar flush into the scrollbar column and
+    // the two would fuse into one solid band when they're the same color.
+    let content = Rect { width: inner.width.saturating_sub(1), ..inner };
+
+    // Manage the scroll offset ourselves instead of handing `state` straight
+    // to `List`: its built-in "keep the selection visible" auto-scroll is
+    // exactly what fought a scrollbar-drag trying to pan the view
+    // independent of the current selection (the view kept snapping back to
+    // wherever `selected` was). `state`'s offset is the single source of
+    // truth — kept in sync by `App::scroll_into_view` for keyboard nav and
+    // `App::scroll_offset` for dragging — so render with a throwaway
+    // `ListState` carrying that same offset, passing `selected` through only
+    // when it's already within view (so the normal case still highlights the
+    // active row exactly as before).
+    let visible = (inner.height / row_h.max(1)) as usize;
+    let offset = state.offset().min(len.saturating_sub(visible.max(1)));
+    *state.offset_mut() = offset;
+    let mut scratch = ratatui::widgets::ListState::default();
+    *scratch.offset_mut() = offset;
+    if state.selected().is_some_and(|s| s >= offset && s < offset + visible) {
+        scratch.select(state.selected());
+    }
+    f.render_stateful_widget(list, content, &mut scratch);
+
+    // Only show a scrollbar once content actually overflows the viewport.
+    if len > visible {
+        let mut sb_state = ScrollbarState::new(len).position(offset);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_style(Style::default().fg(if focused { t.accent } else { t.muted }));
+        // Render into `inner` (not the block's own border column): the box's
+        // right border doubles as the column-resize grab zone (`near_divider`
+        // in input.rs grabs both the divider line and the column one to its
+        // left), so painting the thumb there made dragging a column border
+        // fight with the scrollbar sharing the same cell. `inner`'s own last
+        // column is the 1-cell gap left by the highlight fix above, which
+        // isn't claimed by anything else.
+        f.render_stateful_widget(scrollbar, inner, &mut sb_state);
+    }
 }
 
 /// Truncate `s` to `max` chars with ellipsis; pad with spaces if shorter (anchors next column).
