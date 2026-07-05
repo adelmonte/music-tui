@@ -936,7 +936,8 @@ fn render_list(
     // when it's already within view (so the normal case still highlights the
     // active row exactly as before).
     let visible = (inner.height / row_h.max(1)) as usize;
-    let offset = state.offset().min(len.saturating_sub(visible.max(1)));
+    let max_offset = len.saturating_sub(visible.max(1));
+    let offset = state.offset().min(max_offset);
     *state.offset_mut() = offset;
     let mut scratch = ratatui::widgets::ListState::default();
     *scratch.offset_mut() = offset;
@@ -947,7 +948,15 @@ fn render_list(
 
     // Only show a scrollbar once content actually overflows the viewport.
     if len > visible {
-        let mut sb_state = ScrollbarState::new(len).position(offset);
+        // `ScrollbarState`'s thumb math reserves a trailing `viewport_length`
+        // worth of track for content_length (it assumes `position` can reach
+        // `content_length - 1`, i.e. scrolling until only the last item is
+        // pinned to the *top* of the view). Our `offset` only ever reaches
+        // `max_offset` (the last item pinned to the *bottom*), so feeding it
+        // raw `len` left the thumb short of the bottom edge — content_length
+        // needs to be `max_offset + 1` for `position == max_offset` to map to
+        // the very end of the track.
+        let mut sb_state = ScrollbarState::new(max_offset + 1).position(offset);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
