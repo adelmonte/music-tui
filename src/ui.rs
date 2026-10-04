@@ -333,7 +333,7 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
             };
             ListItem::new(Line::from(vec![
                 Span::styled(marker, style),
-                Span::styled(format!("{} — {}", tr.track_artist, tr.title), style),
+                Span::styled(format!("{} — {}", tr.title, tr.track_artist), style),
             ]))
         })
         .collect();
@@ -753,10 +753,8 @@ fn draw_help(f: &mut Frame, area: Rect, t: Theme) {
                 &[
                     ("↑↓ k j", "move selection"),
                     ("←→ h l", "change column"),
-                    ("Enter", "open / play"),
-                    ("a", "queue item"),
-                    ("a (queue)", "remove item"),
-                    ("c", "clear queue"),
+                    ("Enter", "open / play album"),
+                    ("a", "append to queue"),
                 ],
             ),
         ],
@@ -773,6 +771,14 @@ fn draw_help(f: &mut Frame, area: Rect, t: Theme) {
                     ("r", "repeat off/all/one"),
                     ("+ / -", "volume"),
                     ("[ / ]", "seek −/+ 5s"),
+                ],
+            ),
+            (
+                "Queue",
+                &[
+                    ("d / Del", "remove item"),
+                    ("J/K ⇧↑↓", "move item"),
+                    ("c", "clear queue"),
                 ],
             ),
             (
@@ -908,12 +914,11 @@ fn render_list(
     f.render_widget(block, area);
     // Both states set an explicit bg + fg so the whole selected row reads as one
     // uniform bar; relying on REVERSED instead would swap each span's own color
-    // into the background, tinting differently-colored columns unevenly.
+    // into the background, tinting differently-colored columns unevenly. No
+    // BOLD: terminals that render bold as bright turn the default black
+    // selection_fg into bright black (gray), unreadable on most accents.
     let highlight = if focused {
-        Style::default()
-            .bg(t.accent)
-            .fg(t.selection_fg)
-            .add_modifier(Modifier::BOLD)
+        Style::default().bg(t.accent).fg(t.selection_fg)
     } else {
         Style::default().bg(t.muted).fg(t.selection_fg)
     };

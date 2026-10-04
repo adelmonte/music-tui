@@ -159,6 +159,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Tab => app.cycle_focus(true),
         KeyCode::BackTab => app.cycle_focus(false),
 
+        KeyCode::Up if app.focus == Focus::Queue && key.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.move_queue_item(-1)
+        }
+        KeyCode::Down if app.focus == Focus::Queue && key.modifiers.contains(KeyModifiers::SHIFT) => {
+            app.move_queue_item(1)
+        }
+        KeyCode::Char('K') if app.focus == Focus::Queue => app.move_queue_item(-1),
+        KeyCode::Char('J') if app.focus == Focus::Queue => app.move_queue_item(1),
+        KeyCode::Char('d') | KeyCode::Delete if app.focus == Focus::Queue => {
+            app.remove_from_queue()
+        }
         KeyCode::Up | KeyCode::Char('k') => app.on_up(),
         KeyCode::Down | KeyCode::Char('j') => app.on_down(),
         KeyCode::PageUp => app.move_selection(-10),

@@ -745,10 +745,31 @@ impl App {
         self.notify("Removed from queue.");
     }
 
+    /// Shift the selected queue item up (`delta < 0`) or down, carrying the
+    /// selection and the now-playing marker with it.
+    pub fn move_queue_item(&mut self, delta: i32) {
+        let Some(i) = self.queue_state.selected() else {
+            return;
+        };
+        let j = i as i64 + delta as i64;
+        if i >= self.queue.len() || j < 0 || j as usize >= self.queue.len() {
+            return;
+        }
+        let j = j as usize;
+        self.queue.swap(i, j);
+        self.now = match self.now {
+            Some(n) if n == i => Some(j),
+            Some(n) if n == j => Some(i),
+            other => other,
+        };
+        self.queue_state.select(Some(j));
+        scroll_into_view(&mut self.queue_state, self.rects.queue.height as usize);
+    }
+
     /// Record the playing track as the persistent status line, clearing any
     /// transient message.
     fn set_now_playing(&mut self, track: &Track) {
-        self.now_playing = format!("▶ {} — {}", track.track_artist, track.title);
+        self.now_playing = format!("▶ {} — {}", track.title, track.track_artist);
         self.status = self.now_playing.clone();
         self.notify_until = None;
     }
@@ -766,9 +787,11 @@ impl App {
         };
         // Crossfade into manually-picked tracks too (Enter, next/prev, IPC),
         // not just the automatic near-end handoff in `on_tick`. Skip it when
-        // replaying the same index (e.g. "previous" restarting the current
-        // track) since fading a track into itself just phases with its own tail.
-        let want_crossfade = self.now != Some(i)
+        // replaying the same track (e.g. "previous" restarting it) since fading
+        // a track into itself just phases with its own tail. Compare by path,
+        // not queue index: playing from the browser or a playlist replaces the
+        // queue first, so a matching index there is usually a different track.
+        let want_crossfade = self.audio.current_path() != Some(track.path.as_path())
             && self.audio.is_playing()
             && self.audio.crossfade_secs() > 0.0
             && (track.length_secs as f32) > self.audio.crossfade_secs();

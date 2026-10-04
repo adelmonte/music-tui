@@ -61,7 +61,7 @@ Press `?` in the app for the full list. Highlights:
 | `↑↓` or `k`/`j` | move selection |
 | `←→` or `h`/`l` | change column |
 | `Enter` | open artist/album · play track |
-| `a` | add to queue (in the queue, removes the item) |
+| `a` | append selection to the queue |
 | `c` | clear queue |
 | `Space` | play / pause |
 | `n` / `p` | next / previous |
@@ -70,6 +70,22 @@ Press `?` in the app for the full list. Highlights:
 | `[` / `]` | seek −/+ 5s |
 | `Alt+]` / `Alt+[` | grow / shrink the focused column (or the queue when it's focused) |
 | `q` / `Ctrl-C` | quit |
+
+### The queue
+
+Playing a track (`Enter` or double-click in the Tracks column) **replaces** the queue with
+that album and starts at the chosen track; double-clicking an artist or album plays all of
+it the same way. To build up a queue without replacing it, use `a` instead: it appends the
+highlighted track, album, or artist.
+
+With the Queue panel focused:
+
+| Key | Action |
+| --- | --- |
+| `Enter` | play that item |
+| `d` / `Delete` | remove the item (`a` also works) |
+| `J` / `K` or `Shift+↓` / `Shift+↑` | move the item down / up |
+| `c` | clear the whole queue (works from any panel) |
 
 In the **Playlists** tab: `n` save the current queue as a new playlist, `a` append the
 queue to the selected playlist, `d` delete a playlist, `x` remove a track, `Enter` play.

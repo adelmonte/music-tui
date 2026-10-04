@@ -54,6 +54,10 @@ impl Audio {
         })
     }
 
+    pub fn current_path(&self) -> Option<&Path> {
+        self.current.as_deref()
+    }
+
     pub fn crossfade_secs(&self) -> f32 {
         self.crossfade_secs
     }
