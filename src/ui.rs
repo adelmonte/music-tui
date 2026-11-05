@@ -3,8 +3,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Bar, BarChart, BarGroup, Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Scrollbar,
-    ScrollbarOrientation, ScrollbarState, Wrap,
+    Bar, BarChart, BarGroup, Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap,
 };
 use ratatui::Frame;
 use ratatui_image::{Resize, StatefulImage};
@@ -952,29 +951,25 @@ fn render_list(
     f.render_stateful_widget(list, content, &mut scratch);
 
     // Only show a scrollbar once content actually overflows the viewport.
-    if len > visible {
-        // `ScrollbarState`'s thumb math reserves a trailing `viewport_length`
-        // worth of track for content_length (it assumes `position` can reach
-        // `content_length - 1`, i.e. scrolling until only the last item is
-        // pinned to the *top* of the view). Our `offset` only ever reaches
-        // `max_offset` (the last item pinned to the *bottom*), so feeding it
-        // raw `len` left the thumb short of the bottom edge — content_length
-        // needs to be `max_offset + 1` for `position == max_offset` to map to
-        // the very end of the track.
-        let mut sb_state = ScrollbarState::new(max_offset + 1).position(offset);
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(None)
-            .end_symbol(None)
-            .track_symbol(None)
-            .thumb_style(Style::default().fg(if focused { t.accent } else { t.muted }));
-        // Render into `inner` (not the block's own border column): the box's
-        // right border doubles as the column-resize grab zone (`near_divider`
-        // in input.rs grabs both the divider line and the column one to its
-        // left), so painting the thumb there made dragging a column border
-        // fight with the scrollbar sharing the same cell. `inner`'s own last
-        // column is the 1-cell gap left by the highlight fix above, which
-        // isn't claimed by anything else.
-        f.render_stateful_widget(scrollbar, inner, &mut sb_state);
+    // Drawn by hand rather than with ratatui's `Scrollbar`: that rounds the
+    // thumb's start and end independently, so its length wobbled by a cell
+    // as the list scrolled. Here the length is fixed by the viewport/content
+    // ratio and only the start moves, spanning the full track from
+    // `offset == 0` (top) to `offset == max_offset` (flush with the bottom).
+    // It paints `inner`'s last column (not the block's border): the right
+    // border doubles as the column-resize grab zone (`near_divider` in
+    // input.rs), and that column is the 1-cell gap left by the highlight fix
+    // above, which nothing else claims.
+    if len > visible && inner.width > 0 && inner.height > 0 {
+        let track = inner.height as usize;
+        let thumb_len = ((track * visible + len / 2) / len).clamp(1, track);
+        let thumb_start = ((track - thumb_len) * offset + max_offset / 2) / max_offset.max(1);
+        let x = inner.x + inner.width - 1;
+        let style = Style::default().fg(if focused { t.accent } else { t.muted });
+        let buf = f.buffer_mut();
+        for row in thumb_start..thumb_start + thumb_len {
+            buf[(x, inner.y + row as u16)].set_symbol("█").set_style(style);
+        }
     }
 }
 
