@@ -350,6 +350,7 @@ impl App {
         } else {
             app.status = format!("{} tracks loaded.", app.library.tracks.len());
         }
+        prune_legacy_art_cache();
         if app.cache_all_art {
             app.start_art_precache();
         }
@@ -850,7 +851,7 @@ impl App {
         }
         for msg in pending {
             if let Some(img) = &msg.image {
-                if self.art_cache.len() > 128 {
+                if self.art_cache.len() > 16 {
                     self.art_cache.clear();
                 }
                 self.art_cache.insert(msg.path.clone(), img.clone());
@@ -1318,13 +1319,18 @@ impl App {
     /// Build cover thumbnails for the whole library on a background thread so
     /// they're cached on disk and load instantly later.
     pub fn start_art_precache(&self) {
-        let paths: Vec<PathBuf> = self.library.tracks.iter().map(|t| t.path.clone()).collect();
+        // One track per album: tracks sharing a cover share a thumbnail, so
+        // there's no point re-reading every track's tags.
+        let mut seen = HashSet::new();
+        let paths: Vec<PathBuf> = self
+            .library
+            .tracks
+            .iter()
+            .filter(|t| seen.insert((&t.album_artist, &t.album, t.year)))
+            .map(|t| t.path.clone())
+            .collect();
         std::thread::spawn(move || {
             for p in paths {
-                // Skip the decode work entirely if the thumbnail is already on disk.
-                if art_thumb_path(&p).exists() {
-                    continue;
-                }
                 let _ = load_cover_cached(&p);
             }
         });
@@ -1600,38 +1606,73 @@ fn shellexpand_home(p: &str) -> String {
 /// looks crisp, while staying cheap to decode and terminal-encode.
 const ART_THUMB_PX: u32 = 1024;
 
-/// Load a track's cover, preferring a persistent on-disk thumbnail. On a miss,
-/// extract the embedded art from the audio file, downscale, and cache the
-/// thumbnail so subsequent loads (and future sessions) are fast.
-fn art_thumb_path(path: &std::path::Path) -> PathBuf {
+/// On-disk thumbnail for a cover, keyed by a hash of the embedded image bytes
+/// rather than the track path, so every track of an album shares one file.
+fn art_thumb_path(cover: &[u8]) -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(&path, &mut hasher);
+    std::hash::Hash::hash(cover, &mut hasher);
     // The thumbnail size is part of the filename so bumping it invalidates old
-    // (smaller) cached thumbnails instead of reusing them.
+    // cached thumbnails instead of reusing them.
     crate::config::art_cache_dir().join(format!(
-        "{:016x}-{ART_THUMB_PX}.png",
+        "{:016x}-{ART_THUMB_PX}.jpg",
         std::hash::Hasher::finish(&hasher)
     ))
 }
 
+/// Load a track's cover. Covers already within `ART_THUMB_PX` are decoded
+/// straight from the tag and never touch the disk cache; oversized ones are
+/// downscaled once and stored as a JPEG thumbnail shared by every track that
+/// embeds the same image.
 fn load_cover_cached(path: &std::path::Path) -> Option<DynamicImage> {
-    let thumb = art_thumb_path(path);
+    let raw = scan::read_cover(path)?;
+    let thumb = art_thumb_path(&raw);
 
     if let Ok(bytes) = std::fs::read(&thumb)
         && let Ok(img) = image::load_from_memory(&bytes) {
             return Some(img);
         }
 
-    let raw = scan::read_cover(path)?;
     let img = image::load_from_memory(&raw).ok()?;
-    let small = if img.width() > ART_THUMB_PX || img.height() > ART_THUMB_PX {
+    if img.width() <= ART_THUMB_PX && img.height() <= ART_THUMB_PX {
+        return Some(img);
+    }
+    let small = DynamicImage::ImageRgb8(
         img.resize(ART_THUMB_PX, ART_THUMB_PX, image::imageops::FilterType::Triangle)
-    } else {
-        img
-    };
-    let _ = std::fs::create_dir_all(crate::config::art_cache_dir());
-    let _ = small.save(&thumb);
+            .into_rgb8(),
+    );
+    let _ = save_thumb(&small, &thumb);
     Some(small)
+}
+
+/// Write a JPEG thumbnail via a temp file + rename, so concurrent loaders of
+/// the same cover never read a half-written file.
+fn save_thumb(img: &DynamicImage, dest: &std::path::Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(crate::config::art_cache_dir())?;
+    let tmp = dest.with_extension(format!("tmp{}", std::process::id()));
+    {
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut w, 85).encode_image(img)?;
+    }
+    std::fs::rename(&tmp, dest)?;
+    Ok(())
+}
+
+/// Remove cover caches left by older versions: the per-track PNG `art/` dir,
+/// and any thumbnails in the current dir that don't match today's name scheme.
+fn prune_legacy_art_cache() {
+    std::thread::spawn(|| {
+        if let Some(legacy) = crate::config::legacy_art_cache_dir() {
+            let _ = std::fs::remove_dir_all(legacy);
+        }
+        let dir = crate::config::art_cache_dir();
+        let suffix = format!("-{ART_THUMB_PX}.jpg");
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        for e in entries.flatten() {
+            if !e.file_name().to_string_lossy().ends_with(&suffix) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    });
 }
 
 fn clamp(state: &mut ListState, len: usize) {
