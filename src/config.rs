@@ -276,11 +276,16 @@ pub fn playlists_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("music-tui-playlists.toml"))
 }
 
-/// Directory for cached cover-art thumbnails, e.g. ~/.cache/music-tui/art.
+/// Directory for cached cover-art thumbnails, e.g. ~/.cache/music-tui/covers.
 pub fn art_cache_dir() -> PathBuf {
     project_dirs()
-        .map(|d| d.cache_dir().join("art"))
+        .map(|d| d.cache_dir().join("covers"))
         .unwrap_or_else(|| PathBuf::from("music-tui-art-cache"))
+}
+
+/// Pre-0.1.3 per-track PNG thumbnail directory, deleted on startup.
+pub fn legacy_art_cache_dir() -> Option<PathBuf> {
+    project_dirs().map(|d| d.cache_dir().join("art"))
 }
 
 fn config_path() -> PathBuf {
