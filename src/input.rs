@@ -232,12 +232,12 @@ fn scrollbar_col(rect: Rect) -> u16 {
 /// used while a scrollbar thumb is being dragged. Bounded to
 /// `0..=len.saturating_sub(visible)` so the ends of the track line up with
 /// the very top/bottom of the list, matching where the thumb itself is drawn
-/// (`ScrollbarState`'s own position math, in ui.rs).
-fn scroll_offset_at(rect: Rect, y: u16, len: usize) -> Option<usize> {
+/// (`render_list` in ui.rs). `row_h` is the text rows per item (2 for Albums).
+fn scroll_offset_at(rect: Rect, y: u16, len: usize, row_h: u16) -> Option<usize> {
     if len == 0 || rect.height == 0 {
         return None;
     }
-    let visible = rect.height as usize;
+    let visible = ((rect.height / row_h.max(1)) as usize).max(1);
     let max_offset = len.saturating_sub(visible);
     if max_offset == 0 {
         return Some(0);
@@ -310,14 +310,14 @@ fn handle_drag(app: &mut App, x: u16, y: u16) {
 fn scroll_drag(app: &mut App, target: ScrollList, y: u16) {
     let r = app.rects.clone();
     let hit = match target {
-        ScrollList::Artists => scroll_offset_at(r.artists, y, app.view_artists.len()),
-        ScrollList::Albums => scroll_offset_at(r.albums, y, app.view_albums.len()),
-        ScrollList::Tracks => scroll_offset_at(r.tracks, y, app.view_tracks.len()),
-        ScrollList::Queue => scroll_offset_at(r.queue, y, app.queue.len()),
-        ScrollList::PlList => scroll_offset_at(r.pl_list, y, app.playlists.len()),
+        ScrollList::Artists => scroll_offset_at(r.artists, y, app.view_artists.len(), 1),
+        ScrollList::Albums => scroll_offset_at(r.albums, y, app.view_albums.len(), App::ALBUM_ROW_HEIGHT),
+        ScrollList::Tracks => scroll_offset_at(r.tracks, y, app.view_tracks.len(), 1),
+        ScrollList::Queue => scroll_offset_at(r.queue, y, app.queue.len(), 1),
+        ScrollList::PlList => scroll_offset_at(r.pl_list, y, app.playlists.len(), 1),
         ScrollList::PlTracks => {
             let n = app.selected_playlist().map(|p| p.tracks.len()).unwrap_or(0);
-            scroll_offset_at(r.pl_tracks, y, n)
+            scroll_offset_at(r.pl_tracks, y, n, 1)
         }
     };
     if let Some(offset) = hit {
@@ -462,7 +462,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
             app.pl_set_pane(crate::app::PlPane::List);
             if x == scrollbar_col(r.pl_list) {
                 app.dragging = Some(Drag::Scroll(ScrollList::PlList));
-                if let Some(offset) = scroll_offset_at(r.pl_list, y, app.playlists.len()) {
+                if let Some(offset) = scroll_offset_at(r.pl_list, y, app.playlists.len(), 1) {
                     app.scroll_offset(ScrollList::PlList, offset);
                 }
                 return;
@@ -476,7 +476,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
             let n = app.selected_playlist().map(|p| p.tracks.len()).unwrap_or(0);
             if x == scrollbar_col(r.pl_tracks) {
                 app.dragging = Some(Drag::Scroll(ScrollList::PlTracks));
-                if let Some(offset) = scroll_offset_at(r.pl_tracks, y, n) {
+                if let Some(offset) = scroll_offset_at(r.pl_tracks, y, n, 1) {
                     app.scroll_offset(ScrollList::PlTracks, offset);
                 }
                 return;
@@ -514,7 +514,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
         app.set_focus(Focus::Artists);
         if x == scrollbar_col(r.artists) {
             app.dragging = Some(Drag::Scroll(ScrollList::Artists));
-            if let Some(offset) = scroll_offset_at(r.artists, y, app.view_artists.len()) {
+            if let Some(offset) = scroll_offset_at(r.artists, y, app.view_artists.len(), 1) {
                 app.scroll_offset(ScrollList::Artists, offset);
             }
             return;
@@ -532,7 +532,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
         app.set_focus(Focus::Albums);
         if x == scrollbar_col(r.albums) {
             app.dragging = Some(Drag::Scroll(ScrollList::Albums));
-            if let Some(offset) = scroll_offset_at(r.albums, y, app.view_albums.len()) {
+            if let Some(offset) = scroll_offset_at(r.albums, y, app.view_albums.len(), App::ALBUM_ROW_HEIGHT) {
                 app.scroll_offset(ScrollList::Albums, offset);
             }
             return;
@@ -551,7 +551,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
         app.set_focus(Focus::Tracks);
         if x == scrollbar_col(r.tracks) {
             app.dragging = Some(Drag::Scroll(ScrollList::Tracks));
-            if let Some(offset) = scroll_offset_at(r.tracks, y, app.view_tracks.len()) {
+            if let Some(offset) = scroll_offset_at(r.tracks, y, app.view_tracks.len(), 1) {
                 app.scroll_offset(ScrollList::Tracks, offset);
             }
             return;
@@ -568,7 +568,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
         app.set_focus(Focus::Queue);
         if x == scrollbar_col(r.queue) {
             app.dragging = Some(Drag::Scroll(ScrollList::Queue));
-            if let Some(offset) = scroll_offset_at(r.queue, y, app.queue.len()) {
+            if let Some(offset) = scroll_offset_at(r.queue, y, app.queue.len(), 1) {
                 app.scroll_offset(ScrollList::Queue, offset);
             }
             return;
