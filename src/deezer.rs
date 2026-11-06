@@ -172,12 +172,77 @@ pub fn search(q: &str) -> Result<Vec<View>> {
     Ok(out)
 }
 
-/// The landing sections: Deezer's top tracks and popular playlists.
+/// The landing sections: Deezer's top tracks, albums and playlists.
 pub fn home() -> Result<Vec<View>> {
     Ok(vec![
         View { title: "Top songs".into(), items: tracks(&get("chart/0/tracks?limit=100")?, None) },
+        View { title: "Top albums".into(), items: albums(&get("chart/0/albums?limit=50")?) },
         View { title: "Popular playlists".into(), items: playlists(&get("chart/0/playlists?limit=50")?) },
     ])
+}
+
+/// "New releases for you": albums, EPs and singles from the last `days`
+/// days by the given artists, newest first.
+pub fn new_releases(artists: &[String], days: i64) -> Result<View> {
+    let since = date_days_ago(days);
+    let mut found: Vec<(String, Item)> = Vec::new();
+    for name in artists {
+        let hit = get(&format!("search/artist?q={}&limit=1", enc(name)))?;
+        let Some(artist) = data(&hit).first() else { continue };
+        // Only trust an exact name match; a fuzzy hit is someone else.
+        if !artist["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        let Some(id) = artist["id"].as_u64() else { continue };
+        let list = get(&format!("artist/{id}/albums?limit=50"))?;
+        for a in data(&list) {
+            let date = s(&a["release_date"]);
+            if date.as_str() < since.as_str() {
+                continue;
+            }
+            let kind = a["record_type"].as_str().unwrap_or("album");
+            let Some(album_id) = a["id"].as_u64() else { continue };
+            found.push((
+                date.clone(),
+                Item::Album {
+                    id: album_id,
+                    title: s(&a["title"]),
+                    artist: format!("{} · {kind} · {date}", artist["name"].as_str().unwrap_or(name)),
+                    cover: s(&a["cover_medium"]),
+                },
+            ));
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut seen = HashSet::new();
+    let items: Vec<Item> = found
+        .into_iter()
+        .filter(|(_, i)| matches!(i, Item::Album { id, .. } if seen.insert(*id)))
+        .map(|(_, i)| i)
+        .collect();
+    if items.is_empty() {
+        bail!("no new releases");
+    }
+    Ok(View { title: "New releases for you".into(), items })
+}
+
+/// `YYYY-MM-DD` for `days` days before today (UTC).
+fn date_days_ago(days: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = now / 86_400 - days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// The tracks behind an album/artist/playlist row.

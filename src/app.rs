@@ -320,6 +320,7 @@ struct LinkMsg {
 /// Results of background Browser-tab (Deezer) requests.
 enum BrMsg {
     Home(Vec<deezer::View>),
+    /// A personal home section (For you, Because you liked…, New releases).
     ForYou(deezer::View),
     Results(String, Vec<deezer::View>),
     Opened(deezer::View),
@@ -2115,6 +2116,80 @@ impl App {
             });
         });
         self.request_for_you();
+        self.request_personal_sections();
+    }
+
+    /// Add or replace a home section, keeping the personal ones (in a fixed
+    /// order) above the charts. The selection stays on the same section.
+    fn upsert_home(&mut self, view: deezer::View) {
+        fn rank(title: &str) -> u8 {
+            match title {
+                "For you" => 0,
+                t if t.starts_with("Because you liked") => 1,
+                "New releases for you" => 2,
+                _ => 3,
+            }
+        }
+        let selected = self.br_sec_state.selected().and_then(|i| self.br_section(i)).map(|v| v.title.clone());
+        self.br_home.retain(|v| v.title != view.title);
+        let at = self.br_home.iter().position(|v| rank(&v.title) > rank(&view.title)).unwrap_or(self.br_home.len());
+        self.br_home.insert(at, view);
+        if let Some(title) = selected
+            && let Some(i) = (0..self.br_section_count()).find(|&i| self.br_section(i).is_some_and(|v| v.title == title))
+        {
+            self.br_sec_state.select(Some(i));
+        }
+    }
+
+    /// Personal home sections from Liked Songs: a radio for each of the
+    /// three latest likes, and recent releases by the artists liked most.
+    fn request_personal_sections(&mut self) {
+        let Some(liked) = self.sp_store.iter().find(|p| p.name == spotify::LIKED).cloned() else { return };
+        let known: HashSet<(String, String)> = liked
+            .tracks
+            .iter()
+            .map(|t| (t.track_artist.to_lowercase(), t.title.to_lowercase()))
+            .collect();
+        let main = |t: &Track| t.track_artist.split(", ").next().unwrap_or(&t.track_artist).to_string();
+        // Newest likes have the highest rank; one seed per artist.
+        let mut newest: Vec<&Track> = liked.tracks.iter().collect();
+        newest.sort_by(|a, b| b.id.cmp(&a.id));
+        let mut artists = HashSet::new();
+        let seeds: Vec<Track> = newest.iter().filter(|t| artists.insert(main(t))).take(3).map(|t| (*t).clone()).collect();
+        for seed in seeds {
+            let tx = self.br_tx.clone();
+            let known = known.clone();
+            std::thread::spawn(move || {
+                if let Ok(mut view) = deezer::radio(&seed, 30) {
+                    view.title = format!("Because you liked {}", seed.title);
+                    view.items.retain(|i| match i {
+                        deezer::Item::Track(t) => !known.contains(&(t.track_artist.to_lowercase(), t.title.to_lowercase())),
+                        _ => true,
+                    });
+                    let _ = tx.send(BrMsg::ForYou(view));
+                }
+            });
+        }
+        // Artists by how often they're liked, then the latest likes' artists.
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for t in &liked.tracks {
+            *counts.entry(main(t)).or_default() += 1;
+        }
+        let mut ranked: Vec<(String, usize)> = counts.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut pick: Vec<String> = ranked.into_iter().take(25).map(|(a, _)| a).collect();
+        for t in newest.iter().take(40) {
+            let a = main(t);
+            if !pick.contains(&a) {
+                pick.push(a);
+            }
+        }
+        let tx = self.br_tx.clone();
+        std::thread::spawn(move || {
+            if let Ok(view) = deezer::new_releases(&pick, 120) {
+                let _ = tx.send(BrMsg::ForYou(view));
+            }
+        });
     }
 
     /// Build "For you" from the most-liked artists in Liked Songs.
@@ -2197,15 +2272,11 @@ impl App {
             match msg {
                 BrMsg::Home(views) => {
                     self.br_loading = None;
-                    let for_you: Vec<deezer::View> =
-                        self.br_home.drain(..).filter(|v| v.title == "For you").collect();
-                    self.br_home = for_you;
-                    self.br_home.extend(views);
+                    for v in views {
+                        self.upsert_home(v);
+                    }
                 }
-                BrMsg::ForYou(view) => {
-                    self.br_home.retain(|v| v.title != "For you");
-                    self.br_home.insert(0, view);
-                }
+                BrMsg::ForYou(view) => self.upsert_home(view),
                 BrMsg::Results(q, views) => {
                     if q != self.br_query {
                         continue;
@@ -3818,6 +3889,11 @@ impl App {
         self.poll_art();
         let fetch_dirty = self.poll_fetch() | self.poll_links() | self.poll_browser();
         self.maybe_keep_going();
+        // Explore's home sections take a while to build; start at launch so
+        // they're ready by the time the tab is opened.
+        if self.config.browser.enabled {
+            self.ensure_browser_home();
+        }
         let mut row_thumbs_dirty = false;
         if self.tab == Tab::Local {
             self.request_visible_row_thumbs();
@@ -3829,7 +3905,6 @@ impl App {
         } else if self.tab == Tab::Settings {
             self.refresh_cache_stats();
         } else if self.tab == Tab::Browser {
-            self.ensure_browser_home();
             self.br_maybe_search();
             self.prefetch_open_list_covers();
             self.request_visible_br_thumbs();

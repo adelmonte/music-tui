@@ -197,8 +197,15 @@ To keep songs, copy their folders into your music directory (Settings → Downlo
 ### Explore
 
 Search for songs, artists, albums, and playlists (Deezer, with YouTube Music as a
-fallback), browse the charts, or check **For you**, a mix built from the artists you like
-most. `Enter` plays a song or opens an album/artist/playlist, `Backspace`/`Esc` goes back,
+fallback). The home page is rebuilt from your likes every launch:
+
+- **For you**: a mix from the artists you like most
+- **Because you liked …**: a song radio for each of your three latest likes, minus songs
+  you've already liked
+- **New releases for you**: albums, EPs and singles from the last four months by artists
+  you like
+- **Top songs**, **Top albums**, and **Popular playlists** from Deezer's charts
+ `Enter` plays a song or opens an album/artist/playlist, `Backspace`/`Esc` goes back,
 and `f`, `m`, `a`, and `x` work as in the Spotify tab. `S` saves the open list as a playlist
 in your Spotify-tab library.
 
