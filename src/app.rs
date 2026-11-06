@@ -79,7 +79,7 @@ impl Focus {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tab {
     Local,
     Streaming,
@@ -169,6 +169,9 @@ struct Session {
     sp_tracks_focused: bool,
     #[serde(default)]
     sp_sort: String,
+    /// Each tab's search text, by tab name.
+    #[serde(default)]
+    searches: std::collections::BTreeMap<String, String>,
 }
 
 /// One row of the Settings tab. Headers aren't selectable.
@@ -186,6 +189,7 @@ pub enum SettingRow {
     TabSpotify,
     TabExplore,
     TabPlaylists,
+    SharedSearch,
     SpotifyCsv,
     SpotifyReimport,
     SpotifyLinks,
@@ -316,6 +320,24 @@ pub enum GotoKind {
     KeepGoing,
 }
 
+/// What a confirmation does when answered yes.
+pub enum ConfirmAction {
+    Reject(Track),
+    Unlike(Track),
+    SpDelete,
+    DeletePlaylist,
+}
+
+/// A yes/no question before something destructive.
+pub struct Confirm {
+    pub title: &'static str,
+    pub subject: String,
+    pub detail: String,
+    pub yes: &'static str,
+    pub no: &'static str,
+    action: ConfirmAction,
+}
+
 /// The `g` "Go to…" menu, for one track.
 pub struct GotoMenu {
     pub track: Track,
@@ -402,6 +424,8 @@ pub struct App {
     /// Whether the Albums column shows a per-row cover thumbnail.
     pub show_album_thumbnails: bool,
     pub search: String,
+    /// Other tabs' search text while they're not shown (unless shared).
+    searches: HashMap<Tab, String>,
     /// Cursor position within `search`, as a character index (0..=char count).
     pub search_cursor: usize,
     /// Last text removed by a kill command (Ctrl-W/U/K/Alt-D), for Ctrl-Y yank.
@@ -425,8 +449,8 @@ pub struct App {
     /// Some(buffer) while pasting a Spotify playlist link.
     pub link_input: Option<String>,
     pub goto_menu: Option<GotoMenu>,
-    /// A "wrong song?" confirmation waiting for an answer.
-    pub confirm_reject: Option<Track>,
+    /// A yes/no confirmation waiting for an answer.
+    pub confirm: Option<Confirm>,
     /// Song radios, shown as Explore sections (newest first), and the title
     /// of the one still being built.
     pub br_radios: Vec<deezer::View>,
@@ -592,6 +616,7 @@ impl App {
             show_album_thumbnails,
             search: String::new(),
             search_cursor: 0,
+            searches: HashMap::new(),
             kill_buffer: String::new(),
             playlists,
             playlist_state: ListState::default(),
@@ -603,7 +628,7 @@ impl App {
             liked: HashSet::new(),
             link_input: None,
             goto_menu: None,
-            confirm_reject: None,
+            confirm: None,
             br_radios: Vec::new(),
             br_radio_building: None,
             add_menu: None,
@@ -717,7 +742,12 @@ impl App {
             volume: Some(self.audio.volume()),
             shuffle: self.shuffle,
             repeat: format!("{:?}", self.repeat),
-            search: self.search.clone(),
+            search: self.search_for(Tab::Local),
+            searches: [Tab::Local, Tab::Streaming, Tab::Browser, Tab::Playlists]
+                .into_iter()
+                .map(|t| (format!("{t:?}"), self.search_for(t)))
+                .filter(|(_, q)| !q.is_empty())
+                .collect(),
             artist: self.artist_state.selected(),
             album: self.album_state.selected(),
             track: self.track_state.selected(),
@@ -756,6 +786,19 @@ impl App {
         if let Some(tab) = self.tabs().into_iter().find(|t| format!("{t:?}") == s.tab) {
             self.tab = tab;
         }
+        // Each tab's own search (older sessions had one, the Local tab's).
+        let mut searches = s.searches.clone();
+        if searches.is_empty() && !s.search.is_empty() {
+            searches.insert("Local".into(), s.search.clone());
+        }
+        for (name, q) in searches {
+            if let Some(tab) = [Tab::Local, Tab::Streaming, Tab::Browser, Tab::Playlists]
+                .into_iter()
+                .find(|t| format!("{t:?}") == name)
+            {
+                self.searches.insert(tab, q);
+            }
+        }
         self.shuffle = s.shuffle;
         self.repeat = match s.repeat.as_str() {
             "All" => RepeatMode::All,
@@ -772,7 +815,11 @@ impl App {
         self.apply_sp_sort();
 
         // Browser columns: each selection re-derives the columns to its right.
-        self.search = s.search;
+        self.search = if self.config.ui.shared_search {
+            s.search
+        } else {
+            self.searches.remove(&self.tab).unwrap_or_default()
+        };
         self.search_cursor = self.search.chars().count();
         self.artist_state.select(s.artist);
         self.refresh_views();
@@ -848,7 +895,7 @@ impl App {
     /// Recompute the three column views from the current search + selection,
     /// clamping selections to the new lengths.
     pub fn refresh_views(&mut self) {
-        let q = self.search.to_lowercase();
+        let q = self.search_for(Tab::Local).to_lowercase();
         let mut artists = self.library.album_artists(&q, self.config.ui.sort_articles);
         artists.insert(0, "All".to_string());
         self.view_artists = artists;
@@ -872,7 +919,7 @@ impl App {
     /// matches keeps all its tracks; otherwise it keeps only the tracks whose
     /// title/artist/album match, and drops out if none do.
     pub fn refresh_sp_view(&mut self) {
-        let q = self.search.to_lowercase();
+        let q = self.search_for(Tab::Streaming).to_lowercase();
         let q = q.trim();
         let hit = |t: &Track| {
             [&t.title, &t.track_artist, &t.album]
@@ -1341,11 +1388,47 @@ impl App {
         tabs
     }
 
+    /// Switch tabs, swapping in that tab's own search text.
+    pub fn set_tab(&mut self, tab: Tab) {
+        if tab == self.tab {
+            return;
+        }
+        if !self.config.ui.shared_search {
+            let mine = std::mem::take(&mut self.search);
+            self.searches.insert(self.tab, mine);
+            self.search = self.searches.remove(&tab).unwrap_or_default();
+            self.search_cursor = self.search.chars().count();
+        }
+        self.tab = tab;
+    }
+
+    /// The search text that applies to `tab`.
+    pub fn search_for(&self, tab: Tab) -> String {
+        if tab == self.tab || self.config.ui.shared_search {
+            self.search.clone()
+        } else {
+            self.searches.get(&tab).cloned().unwrap_or_default()
+        }
+    }
+
+    /// Settings: toggle one search shared by all tabs.
+    pub fn toggle_shared_search(&mut self) {
+        self.config.ui.shared_search = !self.config.ui.shared_search;
+        self.searches.clear();
+        let _ = self.config.save();
+        self.refresh_views();
+        self.notify(if self.config.ui.shared_search {
+            "Search is now shared by all tabs."
+        } else {
+            "Each tab now keeps its own search."
+        });
+    }
+
     /// Switch to the `n`th (1-based) visible tab. False if there's no such tab.
     pub fn goto_tab(&mut self, n: usize) -> bool {
         match n.checked_sub(1).and_then(|i| self.tabs().get(i).copied()) {
             Some(tab) => {
-                self.tab = tab;
+                self.set_tab(tab);
                 true
             }
             None => false,
@@ -1538,12 +1621,14 @@ impl App {
             return;
         }
         if self.liked.contains(&track.path) {
-            if let Some(l) = self.store_list_mut(spotify::LIKED) {
-                l.tracks.retain(|t| t.path != track.path);
-            }
-            spotify::save_store(&self.sp_store);
-            self.rebuild_streaming();
-            self.notify(format!("Removed '{}' from Liked Songs.", track.title));
+            self.confirm = Some(Confirm {
+                title: " Remove from Liked Songs? ",
+                subject: format!("{} — {}", track.title, track.track_artist),
+                detail: "It stays in any other playlists it's in.".into(),
+                yes: "Remove",
+                no: "Keep",
+                action: ConfirmAction::Unlike(track),
+            });
         } else {
             self.add_to_store_list(spotify::LIKED, std::slice::from_ref(&track));
             self.notify(format!("♥ Liked '{}'.", track.title));
@@ -1661,7 +1746,37 @@ impl App {
 
     /// `d` in the Streaming tab: remove the highlighted track from its list,
     /// or unlink a linked playlist when the list pane is focused.
+    fn unlike(&mut self, track: &Track) {
+        if let Some(l) = self.store_list_mut(spotify::LIKED) {
+            l.tracks.retain(|t| t.path != track.path);
+        }
+        spotify::save_store(&self.sp_store);
+        self.rebuild_streaming();
+        self.notify(format!("Removed '{}' from Liked Songs.", track.title));
+    }
+
+    /// `d` in the Spotify tab: confirm, then unlink the list or remove the song.
     pub fn sp_delete(&mut self) {
+        let Some(list) = self.selected_sp_list().cloned() else { return };
+        let linked = list.name.starts_with("↻ ");
+        let (title, subject, detail, yes) = match (self.sp_focus, linked) {
+            (PlPane::List, true) => (
+                " Unlink playlist? ",
+                list.name.clone(),
+                "It stops refreshing and leaves the sidebar. You can link it again with u.".to_string(),
+                "Unlink",
+            ),
+            (PlPane::Tracks, false) => {
+                let Some(t) = self.sp_target_track() else { return };
+                (" Remove song? ", format!("{} — {}", t.title, t.track_artist), format!("From '{}'.", list.name), "Remove")
+            }
+            // Nothing to remove; let the action explain why.
+            _ => return self.sp_delete_now(),
+        };
+        self.confirm = Some(Confirm { title, subject, detail, yes, no: "Cancel", action: ConfirmAction::SpDelete });
+    }
+
+    fn sp_delete_now(&mut self) {
         let Some(list) = self.selected_sp_list().cloned() else { return };
         let linked = list.name.strip_prefix("↻ ").map(str::to_string);
         match (self.sp_focus, linked) {
@@ -1698,7 +1813,7 @@ impl App {
             }
         } else {
             if self.tab == Tab::Streaming {
-                self.tab = Tab::Settings;
+                self.set_tab(Tab::Settings);
             }
             self.notify("Spotify tab off.");
         }
@@ -1708,7 +1823,7 @@ impl App {
         self.config.browser.enabled = !self.config.browser.enabled;
         let _ = self.config.save();
         if !self.config.browser.enabled && self.tab == Tab::Browser {
-            self.tab = Tab::Settings;
+            self.set_tab(Tab::Settings);
         }
         self.notify(format!("Explore tab {}.", if self.config.browser.enabled { "on" } else { "off" }));
     }
@@ -1717,7 +1832,7 @@ impl App {
         self.config.ui.show_playlists_tab = !self.config.ui.show_playlists_tab;
         let _ = self.config.save();
         if !self.config.ui.show_playlists_tab && self.tab == Tab::Playlists {
-            self.tab = Tab::Settings;
+            self.set_tab(Tab::Settings);
         }
         self.notify(format!(
             "Local Playlists tab {}.",
@@ -1746,6 +1861,7 @@ impl App {
             TabSpotify,
             TabExplore,
             TabPlaylists,
+            SharedSearch,
             Header("Spotify"),
             SpotifyCsv,
         ];
@@ -1797,6 +1913,7 @@ impl App {
             TabSpotify => self.toggle_spotify(),
             TabExplore => self.toggle_browser(),
             TabPlaylists => self.toggle_playlists_tab(),
+            SharedSearch => self.toggle_shared_search(),
             SpotifyReimport => self.reimport_spotify(),
             SpotifyLinks => self.begin_link_input(),
             DownloadsDir => open_in_file_manager(&spotify::music_root()),
@@ -2203,7 +2320,7 @@ impl App {
         }
         let what = if album { track.album.clone() } else { track.track_artist.clone() };
         self.br_loading = Some(format!("“{what}”"));
-        self.tab = Tab::Browser;
+        self.set_tab(Tab::Browser);
         let tx = self.br_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(match deezer::locate(&track, album).and_then(|o| deezer::open(&o)) {
@@ -2231,7 +2348,7 @@ impl App {
         self.br_item_state = ListState::default();
         self.br_item_state.select(Some(0));
         self.br_focus = PlPane::Tracks;
-        self.tab = Tab::Browser;
+        self.set_tab(Tab::Browser);
         self.spawn_radio(seed, false);
     }
 
@@ -2690,14 +2807,26 @@ impl App {
             self.notify("Not downloaded yet — play it first.");
             return;
         }
-        self.confirm_reject = Some(track);
+        self.confirm = Some(Confirm {
+            title: " Wrong song? ",
+            subject: format!("{} — {}", track.title, track.track_artist),
+            detail: "Deletes the download and fetches the next-best YouTube match.".into(),
+            yes: "Find another",
+            no: "Keep it",
+            action: ConfirmAction::Reject(track),
+        });
     }
 
-    pub fn confirm_reject_answer(&mut self, yes: bool) {
-        if let Some(t) = self.confirm_reject.take()
-            && yes
-        {
-            self.reject_track(t);
+    pub fn confirm_answer(&mut self, yes: bool) {
+        let Some(c) = self.confirm.take() else { return };
+        if !yes {
+            return;
+        }
+        match c.action {
+            ConfirmAction::Reject(t) => self.reject_track(t),
+            ConfirmAction::Unlike(t) => self.unlike(&t),
+            ConfirmAction::SpDelete => self.sp_delete_now(),
+            ConfirmAction::DeletePlaylist => self.delete_playlist_now(),
         }
     }
 
@@ -3458,6 +3587,18 @@ impl App {
     }
 
     pub fn delete_playlist(&mut self) {
+        let Some(p) = self.playlist_state.selected().and_then(|i| self.playlists.get(i)) else { return };
+        self.confirm = Some(Confirm {
+            title: " Delete playlist? ",
+            subject: p.name.clone(),
+            detail: format!("{} songs. The music files themselves aren't touched.", p.tracks.len()),
+            yes: "Delete",
+            no: "Cancel",
+            action: ConfirmAction::DeletePlaylist,
+        });
+    }
+
+    fn delete_playlist_now(&mut self) {
         if let Some(i) = self.playlist_state.selected()
             && i < self.playlists.len() {
                 let name = self.playlists.remove(i).name;

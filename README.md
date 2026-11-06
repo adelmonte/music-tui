@@ -76,7 +76,7 @@ Press `?` in the app for the full list. Highlights:
 | Key | Action |
 | --- | --- |
 | `1`–`5` | switch tab (Local · Spotify · Explore · Local Playlists · Settings; hidden tabs are skipped) |
-| `/` | focus search; `Esc` clears it |
+| `/` | focus search (each tab keeps its own search); `Esc` clears it |
 | `Tab` / `Shift-Tab` | cycle focus (columns, bars, buttons) |
 | `↑↓` or `k`/`j` | move selection |
 | `←→` or `h`/`l` | change column |
@@ -250,6 +250,7 @@ cache_all_art = false       # pre-cache all cover thumbnails in the background
 sort_articles = true        # display/sort "The Doors" as "Doors, The"
 show_album_thumbnails = true
 show_playlists_tab = true   # the Local Playlists tab
+shared_search = false       # one search for all tabs (default: each tab keeps its own)
 
 [spotify]
 enabled = false                          # the Spotify tab

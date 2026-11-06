@@ -38,10 +38,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    if app.confirm_reject.is_some() {
+    if app.confirm.is_some() {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.confirm_reject_answer(true),
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => app.confirm_reject_answer(false),
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.confirm_answer(true),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => app.confirm_answer(false),
             _ => {}
         }
         return;
@@ -607,7 +607,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
         return;
     }
     // A click while a popup is open just closes it.
-    if app.goto_menu.take().is_some() || app.confirm_reject.take().is_some() {
+    if app.goto_menu.take().is_some() || app.confirm.take().is_some() {
         return;
     }
     // A fresh click ends any prior drag grab.
@@ -622,7 +622,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
 
     // Tab bar.
     if let Some(&(tab, _)) = r.tabs.iter().find(|(_, rect)| hit(*rect, x, y)) {
-        app.tab = tab;
+        app.set_tab(tab);
         return;
     }
     // "? help" hint in the top-right.

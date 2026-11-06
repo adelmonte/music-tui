@@ -96,6 +96,9 @@ pub struct UiConfig {
     /// Show the Local Playlists tab.
     #[serde(default = "default_true")]
     pub show_playlists_tab: bool,
+    /// One search shared by every tab (otherwise each tab keeps its own).
+    #[serde(default)]
+    pub shared_search: bool,
 }
 
 fn default_true() -> bool {
@@ -110,6 +113,7 @@ impl Default for UiConfig {
             sort_articles: true,
             show_album_thumbnails: default_true(),
             show_playlists_tab: default_true(),
+            shared_search: false,
         }
     }
 }
@@ -511,6 +515,9 @@ impl Config {
                 != Some(self.ui.show_album_thumbnails)
             {
                 ui["show_album_thumbnails"] = toml_edit::value(self.ui.show_album_thumbnails);
+            }
+            if ui.get("shared_search").and_then(|i| i.as_bool()) != Some(self.ui.shared_search) {
+                ui["shared_search"] = toml_edit::value(self.ui.shared_search);
             }
             if ui.get("show_playlists_tab").and_then(|i| i.as_bool()) != Some(self.ui.show_playlists_tab) {
                 ui["show_playlists_tab"] = toml_edit::value(self.ui.show_playlists_tab);

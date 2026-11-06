@@ -43,8 +43,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.goto_menu.is_some() {
         draw_goto_menu(f, app, chunks[2]);
     }
-    if app.confirm_reject.is_some() {
-        draw_confirm_reject(f, app, chunks[2]);
+    if app.confirm.is_some() {
+        draw_confirm(f, app, chunks[2]);
     }
     if let Some(buf) = &app.link_input {
         let t = app.theme;
@@ -174,34 +174,27 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
 /// The keys that matter for the focused pane, in words. `None` keys are
 /// shown but not clickable.
 fn hints(app: &App) -> Vec<(&'static str, Option<KeyCode>, &'static str)> {
-    use crate::app::SettingRow::*;
     let c = |ch| Some(KeyCode::Char(ch));
-    let mut h: Vec<(&'static str, Option<KeyCode>, &'static str)> = match app.tab {
+    let h: Vec<(&'static str, Option<KeyCode>, &'static str)> = match app.tab {
         Tab::Local if app.focus == Focus::Queue => vec![
-            ("Enter", Some(KeyCode::Enter), "Play"),
             ("d", c('d'), "Remove"),
             ("J/K", None, "Move"),
             ("c", c('c'), "Clear queue"),
             ("g", c('g'), "Go to…"),
         ],
         Tab::Local => vec![
-            ("Enter", Some(KeyCode::Enter), "Play"),
             ("a", c('a'), "Add to queue"),
             ("g", c('g'), "Go to… (radio, artist)"),
             ("/", c('/'), "Search"),
-            ("Tab", Some(KeyCode::Tab), "Next panel"),
         ],
         Tab::Streaming if app.sp_focus == PlPane::List => vec![
-            ("Enter", Some(KeyCode::Enter), "Open"),
             ("a", c('a'), "Queue list"),
             ("m", c('m'), "Add list to…"),
             ("u", c('u'), "Link a playlist"),
             ("d", c('d'), "Remove"),
             ("/", c('/'), "Search"),
-            ("Tab", Some(KeyCode::Tab), "Songs"),
         ],
         Tab::Streaming => vec![
-            ("Enter", Some(KeyCode::Enter), "Play"),
             ("g", c('g'), "Go to… (radio, artist, album)"),
             ("f", c('f'), "Like"),
             ("m", c('m'), "Add to playlist"),
@@ -209,18 +202,14 @@ fn hints(app: &App) -> Vec<(&'static str, Option<KeyCode>, &'static str)> {
             ("x", c('x'), "Wrong song?"),
             ("o", c('o'), "Sort"),
             ("/", c('/'), "Search"),
-            ("Tab", Some(KeyCode::Tab), "Lists"),
         ],
         Tab::Browser if app.br_focus == PlPane::List => vec![
-            ("Enter", Some(KeyCode::Enter), "Open"),
             ("a", c('a'), "Queue all"),
             ("S", c('S'), "Save as playlist"),
             ("/", c('/'), "Search"),
-            ("Tab", Some(KeyCode::Tab), "Songs"),
         ],
         Tab::Browser => {
             let mut v = vec![
-                ("Enter", Some(KeyCode::Enter), "Play / open"),
                 ("g", c('g'), "Go to… (radio, artist, album)"),
                 ("f", c('f'), "Like"),
                 ("m", c('m'), "Add to playlist"),
@@ -229,34 +218,18 @@ fn hints(app: &App) -> Vec<(&'static str, Option<KeyCode>, &'static str)> {
                 ("x", c('x'), "Wrong song?"),
             ];
             if !app.br_stack.is_empty() {
-                v.insert(1, ("⌫", Some(KeyCode::Backspace), "Back"));
+                v.insert(0, ("⌫", Some(KeyCode::Backspace), "Back"));
             }
             v
         }
         Tab::Playlists => vec![
-            ("Enter", Some(KeyCode::Enter), "Play"),
             ("n", c('n'), "New from queue"),
             ("a", c('a'), "Append queue"),
             ("d", c('d'), "Delete list"),
             ("x", c('x'), "Remove song"),
-            ("Tab", Some(KeyCode::Tab), "Switch pane"),
         ],
-        Tab::Settings => {
-            let action = match app.selected_setting() {
-                Some(MusicDir | SpotifyCsv) if app.editing_path.is_some() => "Save path",
-                Some(MusicDir | SpotifyCsv) => "Edit path",
-                Some(Gapless) => "Adjust (or ←→)",
-                Some(DownloadsDir | SpotifyCoversDir | LocalArtDir | LibraryFile | ConfigFile) => "Open folder",
-                Some(Rescan | SpotifyReimport | SpotifyLinks) => "Run",
-                _ => "Toggle",
-            };
-            vec![("↑↓", None, "Select"), ("Enter", Some(KeyCode::Enter), action)]
-        }
+        Tab::Settings => Vec::new(),
     };
-    if app.tab != Tab::Settings {
-        h.push(("Space", c(' '), "Play/pause"));
-    }
-    h.push(("?", c('?'), "All shortcuts"));
     h
 }
 
@@ -274,9 +247,9 @@ fn draw_hints(f: &mut Frame, app: &mut App, area: Rect) {
     let right_w: u16 = right.iter().map(|s| s.content.chars().count() as u16).sum();
     let room = area.width.saturating_sub(right_w + 1);
     let width = |h: &(&str, Option<KeyCode>, &str)| (h.0.chars().count() + h.2.chars().count() + 4) as u16;
-    // Drop hints from the middle (keeping "All shortcuts") until they fit.
-    while all.len() > 1 && all.iter().map(width).sum::<u16>() + 1 > room {
-        all.remove(all.len() - 2);
+    // Drop hints from the end until they fit.
+    while !all.is_empty() && all.iter().map(width).sum::<u16>() + 1 > room {
+        all.pop();
     }
     let mut spans = vec![Span::raw(" ")];
     let mut x = area.x + 1;
@@ -326,28 +299,21 @@ fn draw_goto_menu(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(list, popup, &mut state);
 }
 
-fn draw_confirm_reject(f: &mut Frame, app: &mut App, area: Rect) {
+fn draw_confirm(f: &mut Frame, app: &mut App, area: Rect) {
     let t = app.theme;
-    let Some(track) = &app.confirm_reject else { return };
-    let w = 62.min(area.width.saturating_sub(4));
+    let Some(c) = &app.confirm else { return };
+    let w = 64.min(area.width.saturating_sub(4));
+    let inner = w.saturating_sub(4) as usize;
     let popup = Rect::new(area.x + area.width.saturating_sub(w) / 2, area.y + area.height.saturating_sub(6) / 2, w, 6);
     f.render_widget(Clear, popup);
-    let inner = w.saturating_sub(4) as usize;
+    let chip = |k: &str| Span::styled(format!(" {k} "), Style::default().fg(t.selection_fg).bg(t.accent));
     let text = Text::from(vec![
-        Line::from(Span::styled(fit(&format!("{} — {}", track.title, track.track_artist), inner), Style::default().add_modifier(Modifier::BOLD))),
-        Line::from(Span::styled("Playing the wrong song? This deletes the download and", Style::default().fg(t.muted))),
-        Line::from(Span::styled("fetches the next-best YouTube match.", Style::default().fg(t.muted))),
-        Line::from(vec![
-            Span::styled(" y ", Style::default().fg(t.selection_fg).bg(t.accent)),
-            Span::raw(" Find another   "),
-            Span::styled(" n ", Style::default().fg(t.selection_fg).bg(t.accent)),
-            Span::raw(" Keep it"),
-        ]),
+        Line::from(Span::styled(fit(&c.subject, inner), Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(fit(&c.detail, inner), Style::default().fg(t.muted))),
+        Line::from(""),
+        Line::from(vec![chip("y"), Span::raw(format!(" {}    ", c.yes)), chip("n"), Span::raw(format!(" {}", c.no))]),
     ]);
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .title(" Wrong song? ")
-        .border_style(Style::default().fg(t.accent));
+    let block = Block::bordered().border_type(BorderType::Rounded).title(c.title).border_style(Style::default().fg(t.accent));
     f.render_widget(Paragraph::new(text).block(block), popup);
 }
 
@@ -663,6 +629,7 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
                 TabSpotify => ("Spotify tab", on_off(app.config.spotify.enabled).into(), true),
                 TabExplore => ("Explore tab", on_off(app.config.browser.enabled).into(), true),
                 TabPlaylists => ("Local Playlists tab", on_off(app.config.ui.show_playlists_tab).into(), true),
+                SharedSearch => ("Shared search across tabs", on_off(app.config.ui.shared_search).into(), true),
                 SpotifyCsv => (
                     "Export file / folder",
                     editing(PathField::SpotifyCsv)
