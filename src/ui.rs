@@ -816,7 +816,8 @@ fn draw_spotify(f: &mut Frame, app: &mut App, area: Rect) {
             })
             .collect()
     };
-    let list_title = format!(" Library · {} ", app.sp_sort.label());
+    let list_title = " Library ".to_string();
+    let songs_title = format!(" Songs · {} ", app.sp_sort.label());
     render_list(
         f,
         &mut app.sp_list_state,
@@ -889,7 +890,7 @@ fn draw_spotify(f: &mut Frame, app: &mut App, area: Rect) {
         &mut app.sp_track_state,
         titems,
         songs,
-        " Songs ",
+        &songs_title,
         sp_tracks_focused,
         &mut app.rects.sp_tracks,
         t,

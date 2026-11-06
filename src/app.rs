@@ -94,11 +94,11 @@ pub enum SpSort {
 impl SpSort {
     pub fn label(self) -> &'static str {
         match self {
-            SpSort::Recent => "recent first",
+            SpSort::Recent => "newest first",
             SpSort::Oldest => "oldest first",
-            SpSort::Title => "title",
-            SpSort::Artist => "artist",
-            SpSort::Album => "album",
+            SpSort::Title => "by title",
+            SpSort::Artist => "by artist",
+            SpSort::Album => "by album",
         }
     }
     fn next(self) -> SpSort {
