@@ -1,6 +1,16 @@
 # music-tui
 
-![music-tui screenshot](demo.png)
+<p align="center">
+  <img src="screenshots/tour.webp" alt="music-tui: Spotify, Explore and Local tabs" width="900">
+</p>
+
+<table align="center">
+  <tr>
+    <td align="center"><a href="screenshots/spotify.png"><img src="screenshots/spotify-thumb.webp" width="280" alt="Spotify tab"></a><br><sub><b>Spotify</b> · your library, streamed</sub></td>
+    <td align="center"><a href="screenshots/say-it-aint.png"><img src="screenshots/say-it-aint-thumb.webp" width="280" alt="Explore tab"></a><br><sub><b>Explore</b> · search anything</sub></td>
+    <td align="center"><a href="screenshots/warning.png"><img src="screenshots/warning-thumb.webp" width="280" alt="Local tab"></a><br><sub><b>Local</b> · your music folder</sub></td>
+  </tr>
+</table>
 
 A keyboard and mouse-driven terminal music player built with [ratatui](https://ratatui.rs).
 It scans a local music library, browses it by album artist / album / track, manages a

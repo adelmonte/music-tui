@@ -256,6 +256,61 @@ struct RowThumbMsg {
     image: Option<DynamicImage>,
 }
 
+/// One row-thumbnail load.
+struct ThumbJob {
+    key: AlbumRef,
+    srcs: Vec<ThumbSrc>,
+}
+
+/// Background row-thumbnail workers. Jobs are served newest first, so the
+/// rows on screen now load before ones scrolled past; the oldest are
+/// dropped once too many pile up.
+struct ThumbPool {
+    jobs: std::sync::Arc<(std::sync::Mutex<Vec<ThumbJob>>, std::sync::Condvar)>,
+}
+
+impl ThumbPool {
+    const MAX_QUEUED: usize = 96;
+
+    fn new(tx: Sender<RowThumbMsg>) -> Self {
+        let jobs: std::sync::Arc<(std::sync::Mutex<Vec<ThumbJob>>, std::sync::Condvar)> = Default::default();
+        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 6);
+        for _ in 0..workers {
+            let (jobs, tx) = (jobs.clone(), tx.clone());
+            std::thread::spawn(move || {
+                loop {
+                    let job = {
+                        let (lock, ready) = &*jobs;
+                        let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        loop {
+                            if let Some(j) = q.pop() {
+                                break j;
+                            }
+                            q = ready.wait(q).unwrap_or_else(|e| e.into_inner());
+                        }
+                    };
+                    let image = row_thumb(&job.key, &job.srcs);
+                    if tx.send(RowThumbMsg { album: job.key, image }).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        Self { jobs }
+    }
+
+    /// Queue a job; returns the keys of jobs dropped to make room.
+    fn push(&self, job: ThumbJob) -> Vec<AlbumRef> {
+        let (lock, ready) = &*self.jobs;
+        let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        q.push(job);
+        let excess = q.len().saturating_sub(Self::MAX_QUEUED);
+        let dropped = q.drain(..excess).map(|j| j.key).collect();
+        ready.notify_one();
+        dropped
+    }
+}
+
 /// A linked Spotify playlist read in the background.
 struct LinkMsg {
     link: String,
@@ -276,6 +331,7 @@ enum BrMsg {
 }
 
 /// Where a row thumbnail's image comes from.
+#[derive(Clone)]
 pub enum ThumbSrc {
     /// A track's cover (embedded, or a Streaming track's fetched cover).
     Track(PathBuf),
@@ -555,8 +611,10 @@ pub struct App {
     /// Albums confirmed to have no embedded cover, so they aren't re-requested
     /// (and re-decoded from disk) on every tick they stay in view.
     row_thumb_no_art: HashSet<AlbumRef>,
-    row_thumb_tx: Sender<RowThumbMsg>,
     row_thumb_rx: Receiver<RowThumbMsg>,
+    thumb_pool: ThumbPool,
+    /// Cached row thumbnails, oldest first, for eviction.
+    row_thumb_order: std::collections::VecDeque<AlbumRef>,
 
     rng: u64,
     scan_rx: Option<Receiver<ScanMsg>>,
@@ -683,8 +741,9 @@ impl App {
             row_thumb_cache: HashMap::new(),
             row_thumb_inflight: HashSet::new(),
             row_thumb_no_art: HashSet::new(),
-            row_thumb_tx,
+            thumb_pool: ThumbPool::new(row_thumb_tx),
             row_thumb_rx,
+            row_thumb_order: Default::default(),
             rng: seed,
             scan_rx: None,
         };
@@ -2767,11 +2826,8 @@ impl App {
     /// known-missing. Several sources make a 2×2 mosaic. Covers may need a
     /// network fetch, so only a few run at once.
     fn spawn_thumb_jobs(&mut self, jobs: Vec<(AlbumRef, Vec<ThumbSrc>)>) {
-        const MAX_INFLIGHT: usize = 6;
-        for (key, srcs) in jobs {
-            if self.row_thumb_inflight.len() >= MAX_INFLIGHT {
-                break;
-            }
+        // Pushed in reverse so the first (most urgent) is served first.
+        for (key, srcs) in jobs.into_iter().rev() {
             if srcs.is_empty()
                 || self.row_thumb_cache.contains_key(&key)
                 || self.row_thumb_inflight.contains(&key)
@@ -2780,19 +2836,9 @@ impl App {
                 continue;
             }
             self.row_thumb_inflight.insert(key.clone());
-            let tx = self.row_thumb_tx.clone();
-            std::thread::spawn(move || {
-                let covers: Vec<DynamicImage> = srcs
-                    .iter()
-                    .filter_map(|s| match s {
-                        ThumbSrc::Track(p) => load_cover_cached(p),
-                        ThumbSrc::Url(u) if !u.is_empty() => spotify::url_image(u),
-                        ThumbSrc::Url(_) => None,
-                    })
-                    .collect();
-                let image = cover_mosaic(covers);
-                let _ = tx.send(RowThumbMsg { album: key, image });
-            });
+            for gone in self.thumb_pool.push(ThumbJob { key, srcs }) {
+                self.row_thumb_inflight.remove(&gone);
+            }
         }
     }
 
@@ -3079,47 +3125,33 @@ impl App {
     /// Kick off background decodes for Albums-column thumbnails scrolled into
     /// view. Capped per call so a fast PageDown/End jump doesn't burst-spawn a
     /// thread per album at once — the rest catch up over the following ticks.
+    /// Row thumbnails kept decoded in memory (each is tiny).
+    const ROW_THUMB_CAP: usize = 768;
+
+    /// True while row thumbnails are loading, so the UI polls quickly and
+    /// shows each one as soon as it's ready.
+    pub fn thumbs_pending(&self) -> bool {
+        !self.row_thumb_inflight.is_empty()
+    }
+
     fn request_visible_row_thumbs(&mut self) {
         if !self.show_album_thumbnails || !self.art.available() {
             return;
         }
-        const MAX_NEW_PER_TICK: usize = 4;
         let area = self.rects.albums;
         if area.height == 0 {
             return;
         }
         let visible = (area.height / Self::ALBUM_ROW_HEIGHT).max(1) as usize;
         let offset = self.album_state.offset();
-        let mut spawned = 0;
-        for i in thumb_window(offset, visible, self.view_albums.len()) {
-            let album = &self.view_albums[i];
-            if spawned >= MAX_NEW_PER_TICK {
-                break;
-            }
-            // The synthetic "All" row (index 0) has no single cover.
-            if album.album_artist.is_empty() && album.year.is_none() && album.title == "All" {
-                continue;
-            }
-            if self.row_thumb_cache.contains_key(album)
-                || self.row_thumb_inflight.contains(album)
-                || self.row_thumb_no_art.contains(album)
-            {
-                continue;
-            }
-            let Some(track) = self.library.album_cover_track(album) else {
-                continue;
-            };
-            let path = track.path.clone();
-            let album = album.clone();
-            self.row_thumb_inflight.insert(album.clone());
-            let tx = self.row_thumb_tx.clone();
-            std::thread::spawn(move || {
-                let image = load_cover_cached(&path)
-                    .map(|img| img.resize(128, 128, image::imageops::FilterType::Triangle));
-                let _ = tx.send(RowThumbMsg { album, image });
-            });
-            spawned += 1;
-        }
+        let jobs: Vec<(AlbumRef, Vec<ThumbSrc>)> = thumb_window(offset, visible, self.view_albums.len())
+            .map(|i| &self.view_albums[i])
+            // The synthetic "All" row has no single cover.
+            .filter(|a| !(a.album_artist.is_empty() && a.year.is_none() && a.title == "All"))
+            .filter(|a| !self.row_thumb_cache.contains_key(*a) && !self.row_thumb_inflight.contains(*a))
+            .filter_map(|a| Some((a.clone(), vec![ThumbSrc::Track(self.library.album_cover_track(a)?.path.clone())])))
+            .collect();
+        self.spawn_thumb_jobs(jobs);
     }
 
     /// Drain decoded row thumbnails and build their render protocols. Returns
@@ -3130,10 +3162,15 @@ impl App {
             self.row_thumb_inflight.remove(&msg.album);
             match msg.image.and_then(|img| self.art.protocol_from_image(img)) {
                 Some(proto) => {
-                    if self.row_thumb_cache.len() > 512 {
-                        self.row_thumb_cache.clear();
+                    // Evict oldest-first, so what's on screen never blinks out.
+                    while self.row_thumb_order.len() >= Self::ROW_THUMB_CAP {
+                        if let Some(old) = self.row_thumb_order.pop_front() {
+                            self.row_thumb_cache.remove(&old);
+                        }
                     }
-                    self.row_thumb_cache.insert(msg.album, proto);
+                    if self.row_thumb_cache.insert(msg.album.clone(), proto).is_none() {
+                        self.row_thumb_order.push_back(msg.album);
+                    }
                     changed = true;
                 }
                 None => {
@@ -3532,16 +3569,21 @@ impl App {
         // One track per album: tracks sharing a cover share a thumbnail, so
         // there's no point re-reading every track's tags.
         let mut seen = HashSet::new();
-        let paths: Vec<PathBuf> = self
+        let albums: Vec<(AlbumRef, PathBuf)> = self
             .library
             .tracks
             .iter()
             .filter(|t| seen.insert((&t.album_artist, &t.album, t.year)))
-            .map(|t| t.path.clone())
+            .map(|t| {
+                let key = AlbumRef { album_artist: t.album_artist.clone(), title: t.album.clone(), year: t.year };
+                (key, t.path.clone())
+            })
             .collect();
+        // Builds both the now-playing size and the row thumbnail on disk, so
+        // every album's cover is instant later.
         std::thread::spawn(move || {
-            for p in paths {
-                let _ = load_cover_cached(&p);
+            for (key, p) in albums {
+                let _ = row_thumb(&key, &[ThumbSrc::Track(p)]);
             }
         });
     }
@@ -3917,13 +3959,65 @@ fn load_cover_cached(path: &std::path::Path) -> Option<DynamicImage> {
     Some(small)
 }
 
+/// Row thumbnails are drawn about 4×2 cells, so this is plenty even on
+/// HiDPI. Part of the cache file name, so changing it rebuilds them.
+const ROW_THUMB_PX: u32 = 96;
+
+/// A row thumbnail, from the disk cache or built from its covers (then
+/// cached). The cache name covers the row and its sources (a local file's
+/// size and modification time too), so edited covers and changed playlist
+/// mosaics get rebuilt. Missing art isn't cached: it may arrive later.
+fn row_thumb(key: &AlbumRef, srcs: &[ThumbSrc]) -> Option<DynamicImage> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut h);
+    for s in srcs {
+        match s {
+            ThumbSrc::Track(p) => {
+                p.hash(&mut h);
+                if !spotify::is_remote(p)
+                    && let Ok(m) = std::fs::metadata(p)
+                {
+                    m.len().hash(&mut h);
+                    m.modified().ok().hash(&mut h);
+                }
+            }
+            ThumbSrc::Url(u) => u.hash(&mut h),
+        }
+    }
+    let file = row_thumb_dir().join(format!("{:016x}-{ROW_THUMB_PX}.jpg", h.finish()));
+    if let Ok(bytes) = std::fs::read(&file)
+        && let Ok(img) = image::load_from_memory(&bytes)
+    {
+        return Some(img);
+    }
+    let covers: Vec<DynamicImage> = srcs
+        .iter()
+        .filter_map(|s| match s {
+            ThumbSrc::Track(p) => load_cover_cached(p),
+            ThumbSrc::Url(u) if !u.is_empty() => spotify::url_image(u),
+            ThumbSrc::Url(_) => None,
+        })
+        .collect();
+    let img = cover_mosaic(covers)?;
+    let _ = save_thumb(&img, &file);
+    Some(img)
+}
+
+fn row_thumb_dir() -> PathBuf {
+    crate::config::art_cache_dir().with_file_name("thumbs")
+}
+
 /// Row-thumbnail image from a set of covers: a 2×2 grid when there are four,
 /// otherwise just the first cover.
 fn cover_mosaic(covers: Vec<DynamicImage>) -> Option<DynamicImage> {
     use image::imageops::FilterType;
-    const PX: u32 = 128;
+    const PX: u32 = ROW_THUMB_PX;
     if covers.len() < 4 {
-        return covers.into_iter().next().map(|c| c.resize(PX, PX, FilterType::Triangle));
+        return covers
+            .into_iter()
+            .next()
+            .map(|c| DynamicImage::ImageRgb8(c.resize(PX, PX, FilterType::Triangle).into_rgb8()));
     }
     let mut grid = image::RgbImage::new(PX, PX);
     for (i, c) in covers.iter().take(4).enumerate() {
@@ -3937,7 +4031,9 @@ fn cover_mosaic(covers: Vec<DynamicImage>) -> Option<DynamicImage> {
 /// Write a JPEG thumbnail via a temp file + rename, so concurrent loaders of
 /// the same cover never read a half-written file.
 fn save_thumb(img: &DynamicImage, dest: &std::path::Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(crate::config::art_cache_dir())?;
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     let tmp = dest.with_extension(format!("tmp{}", std::process::id()));
     {
         let mut w = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
@@ -3955,18 +4051,20 @@ fn prune_legacy_art_cache() {
             let _ = std::fs::remove_dir_all(legacy);
         }
         let dir = crate::config::art_cache_dir();
-        let suffix = format!("-{ART_THUMB_PX}.jpg");
-        let Ok(entries) = std::fs::read_dir(&dir) else { return };
-        for e in entries.flatten() {
-            if !e.file_name().to_string_lossy().ends_with(&suffix) {
-                let _ = std::fs::remove_file(e.path());
+        for (dir, px) in [(dir, ART_THUMB_PX), (row_thumb_dir(), ROW_THUMB_PX)] {
+            let suffix = format!("-{px}.jpg");
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for e in entries.flatten() {
+                if !e.file_name().to_string_lossy().ends_with(&suffix) {
+                    let _ = std::fs::remove_file(e.path());
+                }
             }
         }
     });
 }
 
 /// Row indices to load thumbnails for, most urgent first: the rows in view,
-/// then a screen below, then a screen above, so covers are ready before
+/// then two screens below, then a screen above, so covers are ready before
 /// they're scrolled to.
 /// Count and total size of the files under `dir`.
 fn dir_stats(dir: &std::path::Path) -> DirStats {
@@ -3995,7 +4093,7 @@ fn open_in_file_manager(dir: &std::path::Path) {
 
 fn thumb_window(offset: usize, visible: usize, len: usize) -> impl Iterator<Item = usize> {
     let end = (offset + visible).min(len);
-    let below = end..(end + visible).min(len);
+    let below = end..(end + 2 * visible).min(len);
     let above = offset.saturating_sub(visible)..offset;
     (offset.min(len)..end).chain(below).chain(above.rev())
 }

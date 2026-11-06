@@ -110,7 +110,9 @@ fn run(
             || app.scanning.is_some()
             || !app.fetching.is_empty()
             || cmd_rx.is_some();
-        let poll_ms = if busy { 100 } else { 500 };
+        // Covers still loading: check back quickly so each shows as soon as
+        // it's decoded.
+        let poll_ms = if app.thumbs_pending() { 30 } else if busy { 100 } else { 500 };
         let had_event = if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
                 Event::Key(k) if k.kind == KeyEventKind::Press => input::handle_key(app, k),

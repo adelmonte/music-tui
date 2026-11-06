@@ -66,7 +66,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         f.render_widget(Paragraph::new(line).block(block), popup);
     }
     if app.show_help {
-        draw_help(f, f.area(), app.theme);
+        draw_help(f, f.area(), app.tab, app.theme);
     }
     if app.show_art_popup {
         draw_art_popup(f, app);
@@ -1319,160 +1319,198 @@ fn draw_transport(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_help(f: &mut Frame, area: Rect, t: Theme) {
-    // Two columns so the full list fits even on short (80x24) terminals.
-    let left = help_lines(
-        &[
-            (
-                "Global",
-                &[
-                    ("?", "toggle help"),
-                    ("i", "album art popup"),
-                    ("q / ^C", "quit"),
-                    ("Tab", "cycle focus"),
-                    ("1-5", "switch tab"),
-                ],
-            ),
-            (
-                "Search",
-                &[
-                    ("/", "focus search"),
-                    ("type", "filter results"),
-                    ("Enter/↓", "go to results"),
-                    ("Esc", "clear search"),
-                    ("^A / ^E", "start / end of line"),
-                    ("^B/^F ←→", "move by char"),
-                    ("Alt+B/F", "move by word"),
-                    ("^W / Alt+⌫", "del word back"),
-                    ("Alt+D", "del word forward"),
-                    ("^U / ^K", "kill to start / end"),
-                    ("^Y", "yank (paste kill)"),
-                ],
-            ),
-            (
-                "Browse",
-                &[
-                    ("↑↓ k j", "move selection"),
-                    ("←→ h l", "change column"),
-                    ("Enter", "open / play album"),
-                    ("a", "append to queue"),
-                ],
-            ),
-        ],
-        t,
-    );
-    let right = help_lines(
-        &[
-            (
-                "Playback",
-                &[
-                    ("Space", "play / pause"),
-                    ("n / p", "next / prev"),
-                    ("s", "shuffle"),
-                    ("r", "repeat off/all/one"),
-                    ("g", "go to: radio/artist/album"),
-                    ("G", "keep going on/off"),
-                    ("+ / -", "volume"),
-                    ("[ / ]", "seek −/+ 5s"),
-                ],
-            ),
-            (
-                "Queue",
-                &[
-                    ("d / Del", "remove item"),
-                    ("J/K ⇧↑↓", "move item"),
-                    ("c", "clear queue"),
-                    ("Q", "show / hide queue"),
-                ],
-            ),
-            (
-                "Playlists tab",
-                &[
-                    ("n", "new from queue"),
-                    ("a", "append queue"),
-                    ("d", "delete playlist"),
-                    ("x", "remove track"),
-                    ("Enter", "play"),
-                ],
-            ),
-            (
-                "Spotify / Explore",
-                &[
-                    ("Enter", "play / open"),
-                    ("f", "like / unlike"),
-                    ("m", "add to playlist…"),
-                    ("⌫ / Esc", "back (Explore)"),
-                    ("u / d", "link list / remove"),
-                    ("a", "queue track / list"),
-                    ("x", "wrong song? re-match"),
-                    ("Tab", "switch pane"),
-                    ("S", "save list (Explore)"),
-                    ("o", "cycle sort order"),
-                    ("R", "re-import CSV"),
-                ],
-            ),
-            (
-                "Layout & mouse",
-                &[
-                    ("Alt+] [", "resize col / queue"),
-                    ("drag div", "resize columns"),
-                    ("drag bars", "scrub / set"),
-                    ("click", "select anything"),
-                ],
-            ),
-        ],
-        t,
-    );
-
-    let rows = left.len().max(right.len()) as u16;
-    let w = 60.min(area.width.saturating_sub(4));
-    let h = (rows + 2).min(area.height.saturating_sub(2));
-    let popup = Rect::new(
-        area.x + area.width.saturating_sub(w) / 2,
-        area.y + area.height.saturating_sub(h) / 2,
-        w,
-        h,
-    );
-    f.render_widget(Clear, popup);
-    let block = Block::bordered().border_type(BorderType::Rounded)
-        .title(" Help ")
-        .border_style(Style::default().fg(t.accent));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
-    let halves = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(inner);
-    f.render_widget(Paragraph::new(left), halves[0]);
-    f.render_widget(Paragraph::new(right), halves[1]);
+/// Split items with these heights, in order, into at most `n` columns so
+/// the tallest column is as short as possible (each break also saves the
+/// blank line between sections).
+fn balanced_columns(heights: &[usize], n: usize) -> Vec<Vec<usize>> {
+    fn best(h: &[usize], from: usize, n: usize) -> (usize, Vec<usize>) {
+        let rest: usize = h[from..].iter().sum();
+        if n == 1 || from + 1 >= h.len() {
+            return (rest, vec![h.len()]);
+        }
+        let mut top = (usize::MAX, Vec::new());
+        let mut col = 0;
+        for end in from + 1..h.len() {
+            col += h[end - 1];
+            let (tail, mut cuts) = best(h, end, n - 1);
+            let tallest = col.max(tail);
+            if tallest < top.0 {
+                cuts.insert(0, end);
+                top = (tallest, cuts);
+            }
+        }
+        if rest < top.0 { (rest, vec![h.len()]) } else { top }
+    }
+    let mut start = 0;
+    best(heights, 0, n.max(1))
+        .1
+        .into_iter()
+        .map(|end| {
+            let col = (start..end).collect();
+            start = end;
+            col
+        })
+        .filter(|c: &Vec<usize>| !c.is_empty())
+        .collect()
 }
 
-/// Build the help lines for one column: underlined accent section headers, then
-/// accent-bold keys aligned in a fixed column with muted descriptions.
-fn help_lines(sections: &[(&str, &[(&str, &str)])], t: Theme) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    for (i, (name, entries)) in sections.iter().enumerate() {
-        if i > 0 {
-            lines.push(Line::raw(""));
-        }
-        lines.push(Line::from(vec![
-            Span::styled(" ", Style::default().fg(t.accent).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                name.to_string(),
-                Style::default()
-                    .fg(t.accent)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-        ]));
-        for (key, desc) in entries.iter() {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {key:<9}"),
-                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled((*desc).to_string(), Style::default().fg(t.muted)),
-            ]));
-        }
+/// The `?` help panel: every shortcut, grouped by task, in balanced columns.
+/// The current tab's section comes first.
+fn draw_help(f: &mut Frame, area: Rect, tab: Tab, t: Theme) {
+    type Section = (&'static str, Vec<(&'static str, &'static str)>);
+    let songs: Section = (
+        "Spotify & Explore",
+        vec![
+            ("g", "go to: radio · artist · album"),
+            ("G", "keep going after the queue"),
+            ("f", "like / unlike"),
+            ("m", "add to a playlist"),
+            ("x", "wrong song? re-match"),
+            ("S", "save list (Explore)"),
+            ("⌫", "back (Explore)"),
+            ("o", "sort (Spotify)"),
+            ("u  d", "link / unlink (Spotify)"),
+            ("R", "re-import (Spotify)"),
+        ],
+    );
+    let local_playlists: Section = (
+        "Local playlists",
+        vec![
+            ("n", "new from queue"),
+            ("a", "append the queue"),
+            ("d", "delete playlist"),
+            ("x", "remove song"),
+        ],
+    );
+    let mut sections: Vec<Section> = vec![
+        (
+            "Getting around",
+            vec![
+                ("1 – 5", "switch tab"),
+                ("Tab  ⇧Tab", "next / previous area"),
+                ("↑ ↓  j k", "move"),
+                ("← →  h l", "change pane"),
+                ("Enter", "play / open"),
+                ("/", "search"),
+                ("Esc", "clear search · back"),
+                ("?", "this help"),
+                ("q", "quit"),
+            ],
+        ),
+        (
+            "Playback",
+            vec![
+                ("Space", "play / pause"),
+                ("n  p", "next / previous"),
+                ("[  ]", "seek −5 s / +5 s"),
+                ("+  −", "volume"),
+                ("s", "shuffle"),
+                ("r", "repeat: off · all · one"),
+                ("i", "big album art"),
+            ],
+        ),
+        (
+            "Queue",
+            vec![
+                ("a", "add to queue"),
+                ("Q", "show / hide queue"),
+                ("d", "remove (in the queue)"),
+                ("J  K", "move up / down"),
+                ("c", "clear queue"),
+            ],
+        ),
+        songs,
+        local_playlists,
+        (
+            "Mouse & layout",
+            vec![
+                ("click", "select · run a hint"),
+                ("double-click", "play"),
+                ("drag", "seek · volume · scroll"),
+                ("drag divider", "resize panes"),
+                ("Alt+[  Alt+]", "resize focused pane"),
+            ],
+        ),
+        (
+            "Search editing",
+            vec![
+                ("^A  ^E", "start / end of line"),
+                ("^W  Alt+⌫", "delete word"),
+                ("^U  ^K", "delete to start / end"),
+                ("^Y", "paste deleted text"),
+                ("Alt+B  Alt+F", "word left / right"),
+            ],
+        ),
+    ];
+    // The section for the tab in use goes first.
+    let mine = match tab {
+        Tab::Streaming | Tab::Browser => Some(3),
+        Tab::Playlists => Some(4),
+        _ => None,
+    };
+    if let Some(i) = mine {
+        let s = sections.remove(i);
+        sections.insert(0, s);
     }
-    lines
+
+    let w = area.width.saturating_sub(4).min(120);
+    let ncols: usize = if w >= 105 { 3 } else if w >= 68 { 2 } else { 1 };
+    // Split the sections, in order, into columns with the shortest tallest
+    // column (a blank line separates sections).
+    let heights: Vec<usize> = sections.iter().map(|s| s.1.len() + 2).collect();
+    let cols = balanced_columns(&heights, ncols);
+    let col_w = (w.saturating_sub(2) / ncols as u16) as usize;
+    let col_lines: Vec<Vec<Line>> = cols
+        .iter()
+        .map(|idxs| {
+            let mut lines = Vec::new();
+            for (n, &i) in idxs.iter().enumerate() {
+                if n > 0 {
+                    lines.push(Line::raw(""));
+                }
+                let (name, entries) = &sections[i];
+                // The current tab's section header is filled in.
+                let here = mine.is_some() && i == 0;
+                let label = format!(" {name} ");
+                let label_style = if here {
+                    Style::default().fg(t.selection_fg).bg(t.accent).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+                };
+                let rule = col_w.saturating_sub(label.chars().count() + 3);
+                lines.push(Line::from(vec![
+                    Span::styled("─", Style::default().fg(t.border)),
+                    Span::styled(label, label_style),
+                    Span::styled("─".repeat(rule), Style::default().fg(t.border)),
+                ]));
+                let key_w = entries.iter().map(|e| e.0.chars().count()).max().unwrap_or(1);
+                for (key, desc) in entries {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!(" {key:>key_w$}  "), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)),
+                        Span::raw(fit(desc, col_w.saturating_sub(key_w + 4))),
+                    ]));
+                }
+            }
+            lines
+        })
+        .collect();
+
+    let rows = col_lines.iter().map(Vec::len).max().unwrap_or(0) as u16;
+    let h = (rows + 4).min(area.height);
+    let popup = Rect::new(area.x + area.width.saturating_sub(w) / 2, area.y + area.height.saturating_sub(h) / 2, w, h);
+    f.render_widget(Clear, popup);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(Line::from(Span::styled(" Keyboard shortcuts ", Style::default().fg(t.accent).add_modifier(Modifier::BOLD))))
+        .title_bottom(Line::from(Span::styled(" any key closes ", Style::default().fg(t.muted))).right_aligned())
+        .border_style(Style::default().fg(t.accent))
+        .padding(ratatui::widgets::Padding::new(1, 1, 1, 0));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+    let parts = Layout::horizontal(vec![Constraint::Ratio(1, ncols as u32); ncols]).split(inner);
+    for (lines, rect) in col_lines.into_iter().zip(parts.iter()) {
+        f.render_widget(Paragraph::new(lines), *rect);
+    }
 }
 
 // --- helpers -------------------------------------------------------------
