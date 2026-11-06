@@ -77,12 +77,13 @@ Press `?` in the app for the full list. Highlights:
 | --- | --- |
 | `1`–`5` | switch tab (Local · Spotify · Explore · Local Playlists · Settings; hidden tabs are skipped) |
 | `/` | focus search (each tab keeps its own search); `Esc` clears it |
-| `Tab` / `Shift-Tab` | cycle focus (columns, bars, buttons) |
+| `Tab` / `Shift-Tab` | cycle focus in every tab: search → panes → queue → progress → buttons → volume |
 | `↑↓` or `k`/`j` | move selection |
 | `←→` or `h`/`l` | change column |
 | `Enter` | open artist/album · play track |
 | `a` | append selection to the queue |
 | `c` | clear queue |
+| `Q` | show / hide the queue (Local, Spotify and Explore tabs) |
 | `Space` | play / pause |
 | `n` / `p` | next / previous |
 | `s` / `r` | shuffle / repeat (off → all → one) |

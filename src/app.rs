@@ -33,18 +33,6 @@ pub enum Focus {
     Volume,
 }
 
-/// Full Tab cycle, top to bottom.
-const TAB_ORDER: [Focus; 8] = [
-    Focus::Search,
-    Focus::Artists,
-    Focus::Albums,
-    Focus::Tracks,
-    Focus::Queue,
-    Focus::Seekbar,
-    Focus::Transport,
-    Focus::Volume,
-];
-
 impl Focus {
     fn is_list(self) -> bool {
         matches!(
@@ -68,14 +56,6 @@ impl Focus {
             Focus::Tracks => Focus::Queue,
             other => other,
         }
-    }
-    fn next(self) -> Focus {
-        let i = TAB_ORDER.iter().position(|&f| f == self).unwrap_or(0);
-        TAB_ORDER[(i + 1) % TAB_ORDER.len()]
-    }
-    fn prev(self) -> Focus {
-        let i = TAB_ORDER.iter().position(|&f| f == self).unwrap_or(0);
-        TAB_ORDER[(i + TAB_ORDER.len() - 1) % TAB_ORDER.len()]
     }
 }
 
@@ -225,6 +205,8 @@ pub enum PathField {
 pub enum PlPane {
     List,
     Tracks,
+    /// The queue under the songs (Spotify and Explore tabs).
+    Queue,
 }
 
 /// What a left-button drag is currently manipulating, set on mouse-down.
@@ -989,11 +971,10 @@ impl App {
     }
 
     pub fn move_column(&mut self, right: bool) {
-        self.focus = if right {
-            self.focus.right()
-        } else {
-            self.focus.left()
-        };
+        let next = if right { self.focus.right() } else { self.focus.left() };
+        if next != Focus::Queue || self.config.ui.show_queue {
+            self.focus = next;
+        }
     }
 
     /// Arrow / hjkl handlers that mean different things per focus: list nav on
@@ -1131,12 +1112,64 @@ impl App {
         }
     }
 
+    /// Tab / Shift-Tab, the same in every tab: search → the tab's panes →
+    /// queue (when shown) → progress bar → playback buttons → volume.
     pub fn cycle_focus(&mut self, forward: bool) {
-        self.focus = if forward {
-            self.focus.next()
-        } else {
-            self.focus.prev()
+        #[derive(Clone, Copy, PartialEq)]
+        enum Stop {
+            F(Focus),
+            P(PlPane),
+        }
+        let queue = self.config.ui.show_queue;
+        let mut order = Vec::new();
+        if self.tab != Tab::Settings {
+            order.push(Stop::F(Focus::Search));
+        }
+        match self.tab {
+            Tab::Local => {
+                order.extend([Focus::Artists, Focus::Albums, Focus::Tracks].map(Stop::F));
+                if queue {
+                    order.push(Stop::F(Focus::Queue));
+                }
+            }
+            Tab::Streaming | Tab::Browser => {
+                order.extend([PlPane::List, PlPane::Tracks].map(Stop::P));
+                if queue {
+                    order.push(Stop::P(PlPane::Queue));
+                }
+            }
+            Tab::Playlists => order.extend([PlPane::List, PlPane::Tracks].map(Stop::P)),
+            Tab::Settings => order.push(Stop::P(PlPane::List)),
+        }
+        order.extend([Focus::Seekbar, Focus::Transport, Focus::Volume].map(Stop::F));
+        let here = match (self.tab, self.focus) {
+            (_, f @ (Focus::Search | Focus::Seekbar | Focus::Transport | Focus::Volume)) => Stop::F(f),
+            (Tab::Local, f) => Stop::F(f),
+            (Tab::Streaming, _) => Stop::P(self.sp_focus),
+            (Tab::Browser, _) => Stop::P(self.br_focus),
+            (Tab::Playlists, _) => Stop::P(self.pl_focus),
+            (Tab::Settings, _) => Stop::P(PlPane::List),
         };
+        let i = order.iter().position(|s| *s == here).unwrap_or(0) as i32;
+        let n = order.len() as i32;
+        match order[(i + if forward { 1 } else { -1 }).rem_euclid(n) as usize] {
+            Stop::F(f) => self.set_focus(f),
+            Stop::P(p) => {
+                self.focus = Focus::Tracks;
+                match self.tab {
+                    Tab::Streaming => self.sp_focus = p,
+                    Tab::Browser => self.br_focus = p,
+                    Tab::Playlists => self.pl_focus = p,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// True when the keyboard is on the tab's own panes (not the search
+    /// field or the bars at the bottom).
+    pub fn panes_focused(&self) -> bool {
+        !matches!(self.focus, Focus::Search | Focus::Seekbar | Focus::Transport | Focus::Volume)
     }
 
     pub fn set_focus(&mut self, focus: Focus) {
@@ -1644,7 +1677,13 @@ impl App {
                 .zip(self.sp_track_state.selected())
                 .and_then(|(p, i)| p.tracks.get(i).cloned()),
             PlPane::List => self.now.and_then(|i| self.queue.get(i).cloned()),
+            PlPane::Queue => self.queue_selected_track(),
         }
+    }
+
+    /// The highlighted queue entry.
+    fn queue_selected_track(&self) -> Option<Track> {
+        self.queue_state.selected().and_then(|i| self.queue.get(i).cloned())
     }
 
     /// `f`: like/unlike the current track in the Streaming or Browser tab.
@@ -1790,6 +1829,7 @@ impl App {
                 }
             }
             (PlPane::List, None) => self.notify("Only linked (↻) lists can be removed."),
+            (PlPane::Queue, _) => self.remove_from_queue(),
             (PlPane::Tracks, Some(_)) => self.notify("Linked lists are read-only."),
             (PlPane::Tracks, None) => {
                 let Some(track) = self.sp_target_track() else { return };
@@ -1991,6 +2031,9 @@ impl App {
     }
 
     fn br_target_track(&self) -> Option<Track> {
+        if self.br_focus == PlPane::Queue {
+            return self.queue_selected_track();
+        }
         let view = self.br_current()?;
         match view.items.get(self.br_item_state.selected()?)? {
             deezer::Item::Track(t) => Some(t.clone()),
@@ -2163,25 +2206,55 @@ impl App {
                 move_state(&mut self.br_item_state, n, delta);
                 scroll_into_view(&mut self.br_item_state, (self.rects.br_items.height / row_h) as usize);
             }
+            PlPane::Queue => self.queue_move(delta),
         }
     }
 
-    /// Tab: switch between the sidebar and the songs.
-    pub fn br_toggle_pane(&mut self) {
-        self.br_focus = if self.br_focus == PlPane::List { PlPane::Tracks } else { PlPane::List };
+    /// True when the queue pane has the keyboard focus, in any tab.
+    pub fn queue_focused(&self) -> bool {
+        match self.tab {
+            Tab::Local => self.focus == Focus::Queue,
+            Tab::Streaming => self.sp_focus == PlPane::Queue,
+            Tab::Browser => self.br_focus == PlPane::Queue,
+            _ => false,
+        }
     }
 
-    pub fn sp_toggle_pane(&mut self) {
-        let pane = if self.sp_focus == PlPane::List { PlPane::Tracks } else { PlPane::List };
-        self.sp_set_pane(pane);
+    /// Move the queue selection (Spotify/Explore queue pane).
+    pub fn queue_move(&mut self, delta: i32) {
+        move_state(&mut self.queue_state, self.queue.len(), delta);
+        scroll_into_view(&mut self.queue_state, self.rects.queue.height as usize);
     }
 
-    pub fn pl_toggle_pane(&mut self) {
-        let pane = if self.pl_focus == PlPane::List { PlPane::Tracks } else { PlPane::List };
-        self.pl_set_pane(pane);
+    /// Play the highlighted queue entry.
+    pub fn queue_play_selected(&mut self) {
+        if let Some(i) = self.queue_state.selected().filter(|&i| i < self.queue.len()) {
+            self.play_index(i);
+        }
+    }
+
+    /// `Q`: show or hide the queue (remembered).
+    pub fn toggle_queue(&mut self) {
+        self.config.ui.show_queue = !self.config.ui.show_queue;
+        let _ = self.config.save();
+        if !self.config.ui.show_queue {
+            if self.focus == Focus::Queue {
+                self.focus = Focus::Tracks;
+            }
+            if self.sp_focus == PlPane::Queue {
+                self.sp_focus = PlPane::Tracks;
+            }
+            if self.br_focus == PlPane::Queue {
+                self.br_focus = PlPane::Tracks;
+            }
+        }
+        self.notify(if self.config.ui.show_queue { "Queue shown (Q hides it)." } else { "Queue hidden (Q shows it)." });
     }
 
     pub fn br_set_pane(&mut self, pane: PlPane) {
+        if !self.panes_focused() {
+            self.focus = Focus::Tracks;
+        }
         self.br_focus = pane;
     }
 
@@ -2233,6 +2306,7 @@ impl App {
         let tracks: Vec<Track> = match self.br_focus {
             PlPane::List => self.br_current().map(|v| v.tracks()).unwrap_or_default(),
             PlPane::Tracks => self.br_target_track().into_iter().collect(),
+            PlPane::Queue => return,
         };
         if tracks.is_empty() {
             return;
@@ -2254,8 +2328,9 @@ impl App {
             Tab::Local if self.focus == Focus::Tracks => {
                 self.track_state.selected().and_then(|i| self.view_tracks.get(i).cloned())
             }
-            Tab::Streaming if self.sp_focus == PlPane::Tracks => self.sp_target_track(),
-            Tab::Browser if self.br_focus == PlPane::Tracks => self.br_target_track(),
+            Tab::Local if self.focus == Focus::Queue => self.queue_selected_track(),
+            Tab::Streaming if self.sp_focus != PlPane::List => self.sp_target_track(),
+            Tab::Browser if self.br_focus != PlPane::List => self.br_target_track(),
             _ => None,
         };
         highlighted.or_else(|| self.now.and_then(|i| self.queue.get(i).cloned()))
@@ -2739,10 +2814,14 @@ impl App {
                 move_state(&mut self.sp_track_state, n, delta);
                 scroll_into_view(&mut self.sp_track_state, (self.rects.sp_tracks.height / row_h) as usize);
             }
+            PlPane::Queue => self.queue_move(delta),
         }
     }
 
     pub fn sp_set_pane(&mut self, pane: PlPane) {
+        if !self.panes_focused() {
+            self.focus = Focus::Tracks;
+        }
         self.sp_focus = pane;
     }
 
@@ -2752,6 +2831,7 @@ impl App {
         let start = match self.sp_focus {
             PlPane::Tracks => self.sp_track_state.selected().unwrap_or(0),
             PlPane::List => 0,
+            PlPane::Queue => return self.queue_play_selected(),
         };
         let Some(tracks) = self.selected_sp_list().map(|p| p.tracks.clone()) else {
             return;
@@ -2765,6 +2845,7 @@ impl App {
         let Some(list) = self.selected_sp_list() else { return };
         let to_add: Vec<Track> = match self.sp_focus {
             PlPane::List => list.tracks.clone(),
+            PlPane::Queue => return,
             PlPane::Tracks => self
                 .sp_track_state
                 .selected()
@@ -3494,7 +3575,7 @@ impl App {
                 self.pl_track_state.select(if has { Some(0) } else { None });
                 scroll_into_view(&mut self.pl_track_state, self.rects.pl_tracks.height as usize);
             }
-            PlPane::Tracks => {
+            PlPane::Tracks | PlPane::Queue => {
                 let n = self
                     .playlist_state
                     .selected()
@@ -3508,6 +3589,9 @@ impl App {
     }
 
     pub fn pl_set_pane(&mut self, pane: PlPane) {
+        if !self.panes_focused() {
+            self.focus = Focus::Tracks;
+        }
         self.pl_focus = pane;
     }
 
@@ -3515,7 +3599,7 @@ impl App {
     /// track when the track pane is focused).
     pub fn pl_activate(&mut self) {
         let start = match self.pl_focus {
-            PlPane::Tracks => self.pl_track_state.selected().unwrap_or(0),
+            PlPane::Tracks | PlPane::Queue => self.pl_track_state.selected().unwrap_or(0),
             PlPane::List => 0,
         };
         let tracks = match self.selected_playlist() {

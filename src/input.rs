@@ -180,6 +180,47 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Outside Local, the bars at the bottom (progress, playback buttons,
+    // volume) take the arrow keys and Enter the same way they do there;
+    // everything else falls through to the tab's keymap.
+    if app.tab != Tab::Local && !app.panes_focused() && app.focus != Focus::Search {
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') => return app.on_left(),
+            KeyCode::Right | KeyCode::Char('l') => return app.on_right(),
+            KeyCode::Up | KeyCode::Char('k') if app.focus == Focus::Volume => return app.volume_up(),
+            KeyCode::Down | KeyCode::Char('j') if app.focus == Focus::Volume => return app.volume_down(),
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('k') | KeyCode::Char('j') => return,
+            KeyCode::Enter => return app.activate(),
+            KeyCode::Tab => return app.cycle_focus(true),
+            KeyCode::BackTab => return app.cycle_focus(false),
+            KeyCode::Esc => return app.set_focus(Focus::Tracks),
+            _ => {}
+        }
+    }
+
+    // The queue pane under the Spotify/Explore songs: same keys as in Local.
+    if matches!(app.tab, Tab::Streaming | Tab::Browser) && app.queue_focused() && app.panes_focused() {
+        match key.code {
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => return app.move_queue_item(-1),
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => return app.move_queue_item(1),
+            KeyCode::Char('K') => return app.move_queue_item(-1),
+            KeyCode::Char('J') => return app.move_queue_item(1),
+            KeyCode::Up | KeyCode::Char('k') => return app.queue_move(-1),
+            KeyCode::Down | KeyCode::Char('j') => return app.queue_move(1),
+            KeyCode::PageUp => return app.queue_move(-10),
+            KeyCode::PageDown => return app.queue_move(10),
+            KeyCode::Enter => return app.queue_play_selected(),
+            KeyCode::Char('d') | KeyCode::Delete => return app.remove_from_queue(),
+            KeyCode::Char('c') => return app.clear_queue(),
+            _ => {}
+        }
+    }
+
+    // `Q` shows/hides the queue in any tab.
+    if key.code == KeyCode::Char('Q') && app.tab != Tab::Settings {
+        return app.toggle_queue();
+    }
+
     // Settings tab has its own small keymap.
     if app.tab == Tab::Settings {
         match key.code {
@@ -190,6 +231,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::PageUp => app.settings_move(-10),
             KeyCode::PageDown => app.settings_move(10),
             KeyCode::Enter | KeyCode::Char(' ') => app.settings_activate(),
+            KeyCode::Tab => app.cycle_focus(true),
+            KeyCode::BackTab => app.cycle_focus(false),
             KeyCode::Left | KeyCode::Char('h') => app.settings_adjust(-1),
             KeyCode::Right | KeyCode::Char('l') => app.settings_adjust(1),
             KeyCode::Char('e') => app.begin_edit_path(PathField::MusicDir),
@@ -218,7 +261,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::PageDown => app.sp_move(10),
             KeyCode::Left | KeyCode::Char('h') => app.sp_set_pane(PlPane::List),
             KeyCode::Right | KeyCode::Char('l') => app.sp_set_pane(PlPane::Tracks),
-            KeyCode::Tab | KeyCode::BackTab => app.sp_toggle_pane(),
+            KeyCode::Tab => app.cycle_focus(true),
+            KeyCode::BackTab => app.cycle_focus(false),
             KeyCode::Enter => app.sp_activate(),
             KeyCode::Char('a') => app.sp_add_to_queue(),
             KeyCode::Char('R') => app.reimport_spotify(),
@@ -259,7 +303,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::PageDown => app.br_move(10),
             KeyCode::Left | KeyCode::Char('h') => app.br_set_pane(PlPane::List),
             KeyCode::Right | KeyCode::Char('l') => app.br_set_pane(PlPane::Tracks),
-            KeyCode::Tab | KeyCode::BackTab => app.br_toggle_pane(),
+            KeyCode::Tab => app.cycle_focus(true),
+            KeyCode::BackTab => app.cycle_focus(false),
             KeyCode::Enter => app.br_activate(),
             KeyCode::Backspace => {
                 app.br_back();
@@ -302,7 +347,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             KeyCode::Down | KeyCode::Char('j') => app.pl_move(1),
             KeyCode::Left | KeyCode::Char('h') => app.pl_set_pane(crate::app::PlPane::List),
             KeyCode::Right | KeyCode::Char('l') => app.pl_set_pane(crate::app::PlPane::Tracks),
-            KeyCode::Tab | KeyCode::BackTab => app.pl_toggle_pane(),
+            KeyCode::Tab => app.cycle_focus(true),
+            KeyCode::BackTab => app.cycle_focus(false),
             KeyCode::Enter => app.pl_activate(),
             KeyCode::Char('n') => app.begin_new_playlist(),
             KeyCode::Char('a') => app.append_queue_to_playlist(),
@@ -480,6 +526,8 @@ fn sp_scroll(app: &mut App, x: u16, y: u16, delta: i32) {
         app.sp_set_pane(PlPane::List);
     } else if hit(app.rects.sp_tracks, x, y) {
         app.sp_set_pane(PlPane::Tracks);
+    } else if hit(app.rects.queue, x, y) {
+        app.sp_set_pane(PlPane::Queue);
     } else {
         return;
     }
@@ -492,6 +540,8 @@ fn br_scroll(app: &mut App, x: u16, y: u16, delta: i32) {
         app.br_set_pane(PlPane::List);
     } else if hit(app.rects.br_items, x, y) {
         app.br_set_pane(PlPane::Tracks);
+    } else if hit(app.rects.queue, x, y) {
+        app.br_set_pane(PlPane::Queue);
     } else {
         return;
     }
@@ -709,6 +759,28 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
             app.dragging = Some(Drag::SpDivider);
             return;
         }
+        if near_queue_divider(&r, x, y) {
+            app.dragging = Some(Drag::QueueDivider);
+            app.drag_queue_divider(y);
+            return;
+        }
+        if hit(r.queue, x, y) {
+            app.br_set_pane(PlPane::Queue);
+            if x == scrollbar_col(r.queue) {
+                app.dragging = Some(Drag::Scroll(ScrollList::Queue));
+                if let Some(offset) = scroll_offset_at(r.queue, y, app.queue.len(), 1) {
+                    app.scroll_offset(ScrollList::Queue, offset);
+                }
+                return;
+            }
+            if let Some(i) = row_index(r.queue, &app.queue_state, y, app.queue.len(), 1) {
+                app.queue_state.select(Some(i));
+                if double {
+                    app.queue_play_selected();
+                }
+            }
+            return;
+        }
         if hit(r.br_sections, x, y) {
             app.br_set_pane(PlPane::List);
             let n = app.br_section_count();
@@ -754,6 +826,28 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
         let on_div = r.sp_div > 0 && (x == r.sp_div || x == r.sp_div - 1);
         if on_div && y >= b.y && y < b.y + b.height {
             app.dragging = Some(Drag::SpDivider);
+            return;
+        }
+        if near_queue_divider(&r, x, y) {
+            app.dragging = Some(Drag::QueueDivider);
+            app.drag_queue_divider(y);
+            return;
+        }
+        if hit(r.queue, x, y) {
+            app.sp_set_pane(PlPane::Queue);
+            if x == scrollbar_col(r.queue) {
+                app.dragging = Some(Drag::Scroll(ScrollList::Queue));
+                if let Some(offset) = scroll_offset_at(r.queue, y, app.queue.len(), 1) {
+                    app.scroll_offset(ScrollList::Queue, offset);
+                }
+                return;
+            }
+            if let Some(i) = row_index(r.queue, &app.queue_state, y, app.queue.len(), 1) {
+                app.queue_state.select(Some(i));
+                if double {
+                    app.queue_play_selected();
+                }
+            }
             return;
         }
         if hit(r.sp_list, x, y) {

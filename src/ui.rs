@@ -24,6 +24,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     ])
     .split(f.area());
 
+    // The queue's rects are set again by whichever tab draws it.
+    app.rects.queue = Rect::default();
+    app.rects.col3 = Rect::default();
+    app.rects.queue_div = 0;
     draw_tabs(f, app, chunks[0]);
     draw_search(f, app, chunks[1]);
     match app.tab {
@@ -175,8 +179,12 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
 /// shown but not clickable.
 fn hints(app: &App) -> Vec<(&'static str, Option<KeyCode>, &'static str)> {
     let c = |ch| Some(KeyCode::Char(ch));
-    let h: Vec<(&'static str, Option<KeyCode>, &'static str)> = match app.tab {
-        Tab::Local if app.focus == Focus::Queue => vec![
+    if !app.panes_focused() {
+        return Vec::new();
+    }
+    let queue_hint = ("Q", c('Q'), if app.config.ui.show_queue { "Hide queue" } else { "Show queue" });
+    let mut h: Vec<(&'static str, Option<KeyCode>, &'static str)> = match app.tab {
+        _ if app.queue_focused() => vec![
             ("d", c('d'), "Remove"),
             ("J/K", None, "Move"),
             ("c", c('c'), "Clear queue"),
@@ -230,6 +238,9 @@ fn hints(app: &App) -> Vec<(&'static str, Option<KeyCode>, &'static str)> {
         ],
         Tab::Settings => Vec::new(),
     };
+    if matches!(app.tab, Tab::Local | Tab::Streaming | Tab::Browser) {
+        h.push(queue_hint);
+    }
     h
 }
 
@@ -430,12 +441,8 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Column 3: tracks (top) + queue (resizable bottom share).
-    let qp = app.queue_pct;
-    let right =
-        Layout::vertical([Constraint::Percentage(100 - qp), Constraint::Percentage(qp)])
-            .split(cols[2]);
-    app.rects.col3 = cols[2];
-    app.rects.queue_div = right[1].y;
+    let (songs, queue) = split_queue(app, cols[2]);
+    let right = [songs, queue.unwrap_or_default()];
 
     let inner_w = right[0].width.saturating_sub(2) as usize;
     // Layout: "<no> <title>  <album> … <length> " — length is pinned right (a
@@ -493,7 +500,27 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
         1,
     );
 
-    // Queue.
+    if let Some(q) = queue {
+        let focused = app.focus == Focus::Queue;
+        draw_queue(f, app, q, focused);
+    }
+}
+
+/// Split a songs column into songs (top) and the queue (bottom share), or
+/// leave it whole when the queue is hidden.
+fn split_queue(app: &mut App, area: Rect) -> (Rect, Option<Rect>) {
+    if !app.config.ui.show_queue {
+        return (area, None);
+    }
+    let qp = app.queue_pct;
+    let parts = Layout::vertical([Constraint::Percentage(100 - qp), Constraint::Percentage(qp)]).split(area);
+    app.rects.col3 = area;
+    app.rects.queue_div = parts[1].y;
+    (parts[0], Some(parts[1]))
+}
+
+fn draw_queue(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
+    let t = app.theme;
     let now = app.now;
     let items: Vec<ListItem> = app
         .queue
@@ -501,28 +528,15 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
         .enumerate()
         .map(|(i, tr)| {
             let marker = if Some(i) == now { "▶ " } else { "  " };
-            let style = if Some(i) == now {
-                Style::default().fg(t.accent)
-            } else {
-                Style::default()
-            };
+            let style = if Some(i) == now { Style::default().fg(t.accent) } else { Style::default() };
             ListItem::new(Line::from(vec![
                 Span::styled(marker, style),
                 Span::styled(format!("{} — {}", tr.title, tr.track_artist), style),
             ]))
         })
         .collect();
-    render_list(
-        f,
-        &mut app.queue_state,
-        items,
-        right[1],
-        " Queue ",
-        app.focus == Focus::Queue,
-        &mut app.rects.queue,
-        t,
-        1,
-    );
+    let title = if app.queue.is_empty() { " Queue (empty) ".to_string() } else { format!(" Queue · {} ", app.queue.len()) };
+    render_list(f, &mut app.queue_state, items, area, &title, focused, &mut app.rects.queue, t, 1);
 }
 
 /// Columns reserved at the left of each Albums row for its cover thumbnail.
@@ -668,7 +682,8 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
     let title = " Settings ".to_string();
-    render_list(f, &mut app.settings_state, items, area, &title, true, &mut app.rects.settings, t, 1);
+    let focused = app.panes_focused();
+    render_list(f, &mut app.settings_state, items, area, &title, focused, &mut app.rects.settings, t, 1);
 }
 
 fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
@@ -676,8 +691,8 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
     let cols =
         Layout::horizontal([Constraint::Percentage(32), Constraint::Percentage(68)]).split(area);
 
-    let list_focused = app.pl_focus == PlPane::List;
-    let tracks_focused = app.pl_focus == PlPane::Tracks;
+    let list_focused = app.panes_focused() && app.pl_focus == PlPane::List;
+    let tracks_focused = app.panes_focused() && app.pl_focus != PlPane::List;
 
     let names: Vec<ListItem> = if app.playlists.is_empty() {
         vec![ListItem::new(Span::raw("(no playlists — press n)").fg(t.dim))]
@@ -754,6 +769,9 @@ fn draw_spotify(f: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
     app.rects.sp_body = area;
     app.rects.sp_div = cols[1].x;
+    let (songs, queue) = split_queue(app, cols[1]);
+    let sp_list_focused = app.panes_focused() && app.sp_focus == PlPane::List;
+    let sp_tracks_focused = app.panes_focused() && app.sp_focus == PlPane::Tracks;
     let thumbs = app.show_album_thumbnails;
     let row_h = app.sp_row_h();
     let indent = if thumbs { " ".repeat(ALBUM_THUMB_COLS as usize + 1) } else { String::new() };
@@ -805,7 +823,7 @@ fn draw_spotify(f: &mut Frame, app: &mut App, area: Rect) {
         names,
         cols[0],
         &list_title,
-        app.sp_focus == PlPane::List,
+        sp_list_focused,
         &mut app.rects.sp_list,
         t,
         row_h,
@@ -818,10 +836,10 @@ fn draw_spotify(f: &mut Frame, app: &mut App, area: Rect) {
     let playing = app.audio.current_path().map(|p| p.to_path_buf());
     // Only stat the cache for rows that can be on screen.
     let first = app.sp_track_state.offset();
-    let shown = first..first + (cols[1].height / row_h) as usize;
+    let shown = first..first + (songs.height / row_h) as usize;
     // Inner width minus the scrollbar column, the thumbnail indent, the
     // 2-cell state marker and the right-pinned length field.
-    let text_w = (cols[1].width.saturating_sub(3) as usize).saturating_sub(indent.len() + 2);
+    let text_w = (songs.width.saturating_sub(3) as usize).saturating_sub(indent.len() + 2);
     let titems: Vec<ListItem> = tracks
         .iter()
         .enumerate()
@@ -870,9 +888,9 @@ fn draw_spotify(f: &mut Frame, app: &mut App, area: Rect) {
         f,
         &mut app.sp_track_state,
         titems,
-        cols[1],
+        songs,
         " Songs ",
-        app.sp_focus == PlPane::Tracks,
+        sp_tracks_focused,
         &mut app.rects.sp_tracks,
         t,
         row_h,
@@ -886,6 +904,10 @@ fn draw_spotify(f: &mut Frame, app: &mut App, area: Rect) {
         draw_row_thumbs(f, lr, lo, &list_keys, &mut app.row_thumb_cache);
         draw_row_thumbs(f, tr, to, &track_keys, &mut app.row_thumb_cache);
     }
+    if let Some(q) = queue {
+        let focused = app.panes_focused() && app.sp_focus == PlPane::Queue;
+        draw_queue(f, app, q, focused);
+    }
 }
 
 fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
@@ -896,6 +918,9 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
     app.rects.sp_body = area;
     app.rects.sp_div = cols[1].x;
+    let (songs, queue) = split_queue(app, cols[1]);
+    let br_list_focused = app.panes_focused() && app.br_focus == PlPane::List;
+    let br_tracks_focused = app.panes_focused() && app.br_focus == PlPane::Tracks;
     let thumbs = app.show_album_thumbnails;
     let row_h = app.sp_row_h();
     let indent = if thumbs { " ".repeat(ALBUM_THUMB_COLS as usize + 1) } else { String::new() };
@@ -932,7 +957,7 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
         sections,
         cols[0],
         " Explore ",
-        app.br_focus == PlPane::List,
+        br_list_focused,
         &mut app.rects.br_sections,
         t,
         1,
@@ -943,7 +968,7 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
 
     let view = app.br_current().cloned().unwrap_or_default();
     let playing = app.audio.current_path().map(|p| p.to_path_buf());
-    let text_w = (cols[1].width.saturating_sub(3) as usize).saturating_sub(indent.len() + 2);
+    let text_w = (songs.width.saturating_sub(3) as usize).saturating_sub(indent.len() + 2);
     let row = |top: Vec<Span<'static>>, sub: String| -> ListItem<'static> {
         if thumbs {
             let mut a = vec![Span::raw(indent.clone())];
@@ -1025,9 +1050,9 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
         f,
         &mut app.br_item_state,
         items,
-        cols[1],
+        songs,
         &title,
-        app.br_focus == PlPane::Tracks,
+        br_tracks_focused,
         &mut app.rects.br_items,
         t,
         row_h,
@@ -1041,9 +1066,14 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
         let (r, o) = (app.rects.br_items, app.br_item_state.offset());
         draw_row_thumbs(f, r, o, &keys, &mut app.row_thumb_cache);
     }
+    if let Some(q) = queue {
+        let focused = app.panes_focused() && app.br_focus == PlPane::Queue;
+        draw_queue(f, app, q, focused);
+    }
 }
 
-/// The `m` "add to playlist" popup, centered over the body.
+/// The `m` "add to playlist" popup, centered over the body
+
 fn draw_add_menu(f: &mut Frame, app: &mut App, area: Rect) {
     let t = app.theme;
     let targets = app.add_targets();
@@ -1352,6 +1382,7 @@ fn draw_help(f: &mut Frame, area: Rect, t: Theme) {
                     ("d / Del", "remove item"),
                     ("J/K ⇧↑↓", "move item"),
                     ("c", "clear queue"),
+                    ("Q", "show / hide queue"),
                 ],
             ),
             (

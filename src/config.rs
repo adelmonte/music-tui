@@ -99,6 +99,9 @@ pub struct UiConfig {
     /// One search shared by every tab (otherwise each tab keeps its own).
     #[serde(default)]
     pub shared_search: bool,
+    /// Show the queue under the songs (Local, Spotify and Explore tabs).
+    #[serde(default = "default_true")]
+    pub show_queue: bool,
 }
 
 fn default_true() -> bool {
@@ -114,6 +117,7 @@ impl Default for UiConfig {
             show_album_thumbnails: default_true(),
             show_playlists_tab: default_true(),
             shared_search: false,
+            show_queue: true,
         }
     }
 }
@@ -515,6 +519,9 @@ impl Config {
                 != Some(self.ui.show_album_thumbnails)
             {
                 ui["show_album_thumbnails"] = toml_edit::value(self.ui.show_album_thumbnails);
+            }
+            if ui.get("show_queue").and_then(|i| i.as_bool()) != Some(self.ui.show_queue) {
+                ui["show_queue"] = toml_edit::value(self.ui.show_queue);
             }
             if ui.get("shared_search").and_then(|i| i.as_bool()) != Some(self.ui.shared_search) {
                 ui["shared_search"] = toml_edit::value(self.ui.shared_search);
