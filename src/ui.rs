@@ -3,12 +3,13 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Bar, BarChart, BarGroup, Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap,
+    Bar, BarChart, BarGroup, Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph,
 };
+use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui_image::{Resize, StatefulImage};
 
-use crate::app::{App, Focus, PlPane, Tab};
+use crate::app::{App, Focus, PathField, PlPane, Tab};
 use crate::config::Theme;
 use crate::model::{display_artist, fmt_time};
 
@@ -17,6 +18,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Length(1), // tab bar
         Constraint::Length(3), // search
         Constraint::Min(5),    // body
+        Constraint::Length(1), // key hints
         Constraint::Length(3), // seek bar
         Constraint::Length(7), // art + transport
     ])
@@ -25,13 +27,40 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_tabs(f, app, chunks[0]);
     draw_search(f, app, chunks[1]);
     match app.tab {
-        Tab::Browser => draw_body(f, app, chunks[2]),
+        Tab::Local => draw_body(f, app, chunks[2]),
+        Tab::Streaming => draw_spotify(f, app, chunks[2]),
+        Tab::Browser => draw_browser(f, app, chunks[2]),
         Tab::Playlists => draw_playlists(f, app, chunks[2]),
         Tab::Settings => draw_library(f, app, chunks[2]),
     }
-    draw_seekbar(f, app, chunks[3]);
-    draw_bottom(f, app, chunks[4]);
+    draw_hints(f, app, chunks[3]);
+    draw_seekbar(f, app, chunks[4]);
+    draw_bottom(f, app, chunks[5]);
 
+    if app.add_menu.is_some() {
+        draw_add_menu(f, app, chunks[2]);
+    }
+    if app.goto_menu.is_some() {
+        draw_goto_menu(f, app, chunks[2]);
+    }
+    if app.confirm_reject.is_some() {
+        draw_confirm_reject(f, app, chunks[2]);
+    }
+    if let Some(buf) = &app.link_input {
+        let t = app.theme;
+        let area = chunks[2];
+        let w = 72.min(area.width.saturating_sub(4));
+        let popup = Rect::new(area.x + (area.width - w) / 2, area.y + area.height / 2, w, 3);
+        f.render_widget(Clear, popup);
+        let line = Line::from(vec![
+            Span::styled(buf.clone(), Style::default().fg(t.accent)),
+            Span::styled("█", Style::default().fg(t.accent)),
+        ]);
+        let block = Block::bordered().border_type(BorderType::Rounded)
+            .title(" Paste a Spotify playlist link (Enter / Esc) ")
+            .border_style(Style::default().fg(t.accent));
+        f.render_widget(Paragraph::new(line).block(block), popup);
+    }
     if app.show_help {
         draw_help(f, f.area(), app.theme);
     }
@@ -79,7 +108,7 @@ fn draw_art_popup(f: &mut Frame, app: &mut App) {
         h,
     );
     f.render_widget(Clear, popup);
-    let block = Block::bordered()
+    let block = Block::bordered().border_type(BorderType::Rounded)
         .title(" Album art (any key to close) ")
         .border_style(Style::default().fg(t.accent));
     let inner = block.inner(popup);
@@ -105,15 +134,11 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     let t = app.theme;
     // Render each tab as its own span (so clicks map to actual glyph positions)
     // with a │ separator between them.
-    let labels = [" (1) Browser ", " (2) Playlists ", " (3) Settings "];
-    let active = [
-        app.tab == Tab::Browser,
-        app.tab == Tab::Playlists,
-        app.tab == Tab::Settings,
-    ];
-    let mut rects = [Rect::default(); 3];
+    let tabs = app.tabs();
+    let mut rects = Vec::with_capacity(tabs.len());
     let mut x = area.x;
-    for (i, label) in labels.iter().enumerate() {
+    for (i, &tab) in tabs.iter().enumerate() {
+        let label = format!(" ({}) {} ", i + 1, tab.label());
         if i > 0 {
             f.render_widget(
                 Paragraph::new(Span::styled("│", Style::default().fg(t.border))),
@@ -123,18 +148,16 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
         }
         let w = label.chars().count() as u16;
         let r = Rect::new(x, area.y, w, 1);
-        rects[i] = r;
-        let style = if active[i] {
+        rects.push((tab, r));
+        let style = if app.tab == tab {
             Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(t.muted)
         };
-        f.render_widget(Paragraph::new(Span::styled(*label, style)), r);
+        f.render_widget(Paragraph::new(Span::styled(label, style)), r);
         x += w;
     }
-    app.rects.tab_browser = rects[0];
-    app.rects.tab_playlists = rects[1];
-    app.rects.tab_settings = rects[2];
+    app.rects.tabs = rects;
 
     let hint_str = "music-tui  ·  ? help ";
     let hw = hint_str.chars().count() as u16;
@@ -148,15 +171,202 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+/// The keys that matter for the focused pane, in words. `None` keys are
+/// shown but not clickable.
+fn hints(app: &App) -> Vec<(&'static str, Option<KeyCode>, &'static str)> {
+    use crate::app::SettingRow::*;
+    let c = |ch| Some(KeyCode::Char(ch));
+    let mut h: Vec<(&'static str, Option<KeyCode>, &'static str)> = match app.tab {
+        Tab::Local if app.focus == Focus::Queue => vec![
+            ("Enter", Some(KeyCode::Enter), "Play"),
+            ("d", c('d'), "Remove"),
+            ("J/K", None, "Move"),
+            ("c", c('c'), "Clear queue"),
+            ("g", c('g'), "Go to…"),
+        ],
+        Tab::Local => vec![
+            ("Enter", Some(KeyCode::Enter), "Play"),
+            ("a", c('a'), "Add to queue"),
+            ("g", c('g'), "Go to… (radio, artist)"),
+            ("/", c('/'), "Search"),
+            ("Tab", Some(KeyCode::Tab), "Next panel"),
+        ],
+        Tab::Streaming if app.sp_focus == PlPane::List => vec![
+            ("Enter", Some(KeyCode::Enter), "Open"),
+            ("a", c('a'), "Queue list"),
+            ("m", c('m'), "Add list to…"),
+            ("u", c('u'), "Link a playlist"),
+            ("d", c('d'), "Remove"),
+            ("/", c('/'), "Search"),
+            ("Tab", Some(KeyCode::Tab), "Songs"),
+        ],
+        Tab::Streaming => vec![
+            ("Enter", Some(KeyCode::Enter), "Play"),
+            ("g", c('g'), "Go to… (radio, artist, album)"),
+            ("f", c('f'), "Like"),
+            ("m", c('m'), "Add to playlist"),
+            ("a", c('a'), "Queue"),
+            ("x", c('x'), "Wrong song?"),
+            ("o", c('o'), "Sort"),
+            ("/", c('/'), "Search"),
+            ("Tab", Some(KeyCode::Tab), "Lists"),
+        ],
+        Tab::Browser if app.br_focus == PlPane::List => vec![
+            ("Enter", Some(KeyCode::Enter), "Open"),
+            ("a", c('a'), "Queue all"),
+            ("S", c('S'), "Save as playlist"),
+            ("/", c('/'), "Search"),
+            ("Tab", Some(KeyCode::Tab), "Songs"),
+        ],
+        Tab::Browser => {
+            let mut v = vec![
+                ("Enter", Some(KeyCode::Enter), "Play / open"),
+                ("g", c('g'), "Go to… (radio, artist, album)"),
+                ("f", c('f'), "Like"),
+                ("m", c('m'), "Add to playlist"),
+                ("a", c('a'), "Queue"),
+                ("S", c('S'), "Save list"),
+                ("x", c('x'), "Wrong song?"),
+            ];
+            if !app.br_stack.is_empty() {
+                v.insert(1, ("⌫", Some(KeyCode::Backspace), "Back"));
+            }
+            v
+        }
+        Tab::Playlists => vec![
+            ("Enter", Some(KeyCode::Enter), "Play"),
+            ("n", c('n'), "New from queue"),
+            ("a", c('a'), "Append queue"),
+            ("d", c('d'), "Delete list"),
+            ("x", c('x'), "Remove song"),
+            ("Tab", Some(KeyCode::Tab), "Switch pane"),
+        ],
+        Tab::Settings => {
+            let action = match app.selected_setting() {
+                Some(MusicDir | SpotifyCsv) if app.editing_path.is_some() => "Save path",
+                Some(MusicDir | SpotifyCsv) => "Edit path",
+                Some(Gapless) => "Adjust (or ←→)",
+                Some(DownloadsDir | SpotifyCoversDir | LocalArtDir | LibraryFile | ConfigFile) => "Open folder",
+                Some(Rescan | SpotifyReimport | SpotifyLinks) => "Run",
+                _ => "Toggle",
+            };
+            vec![("↑↓", None, "Select"), ("Enter", Some(KeyCode::Enter), action)]
+        }
+    };
+    if app.tab != Tab::Settings {
+        h.push(("Space", c(' '), "Play/pause"));
+    }
+    h.push(("?", c('?'), "All shortcuts"));
+    h
+}
+
+fn draw_hints(f: &mut Frame, app: &mut App, area: Rect) {
+    let t = app.theme;
+    let mut all = hints(app);
+    // Status on the right: what's running in the background.
+    let mut right = Vec::new();
+    if let Some(r) = &app.br_radio_building {
+        right.push(Span::styled(format!("◌ building {r}…  "), Style::default().fg(t.accent)));
+    }
+    if app.config.playback.keep_going {
+        right.push(Span::styled("↻ keep going  ", Style::default().fg(t.accent)));
+    }
+    let right_w: u16 = right.iter().map(|s| s.content.chars().count() as u16).sum();
+    let room = area.width.saturating_sub(right_w + 1);
+    let width = |h: &(&str, Option<KeyCode>, &str)| (h.0.chars().count() + h.2.chars().count() + 4) as u16;
+    // Drop hints from the middle (keeping "All shortcuts") until they fit.
+    while all.len() > 1 && all.iter().map(width).sum::<u16>() + 1 > room {
+        all.remove(all.len() - 2);
+    }
+    let mut spans = vec![Span::raw(" ")];
+    let mut x = area.x + 1;
+    app.rects.hints.clear();
+    for h in &all {
+        let w = width(h);
+        if let Some(code) = h.1 {
+            app.rects.hints.push((Rect::new(x, area.y, w - 2, 1), code));
+        }
+        spans.push(Span::styled(format!(" {} ", h.0), Style::default().fg(t.selection_fg).bg(t.accent)));
+        spans.push(Span::styled(format!(" {}", h.2), Style::default().fg(t.muted)));
+        spans.push(Span::raw("  "));
+        x += w;
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    f.render_widget(Paragraph::new(Line::from(right)).alignment(Alignment::Right), area);
+}
+
+fn draw_goto_menu(f: &mut Frame, app: &mut App, area: Rect) {
+    let t = app.theme;
+    let entries = app.goto_entries();
+    let Some(menu) = &app.goto_menu else { return };
+    let w = 60.min(area.width.saturating_sub(4));
+    let h = (entries.len() as u16 + 2).min(area.height);
+    let popup = Rect::new(area.x + area.width.saturating_sub(w) / 2, area.y + area.height.saturating_sub(h) / 2, w, h);
+    f.render_widget(Clear, popup);
+    let items: Vec<ListItem> = entries
+        .iter()
+        .map(|(k, label, _)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {k} "), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)),
+                Span::raw(fit(label, w.saturating_sub(7) as usize)),
+            ]))
+        })
+        .collect();
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(menu.sel));
+    let list = List::new(items)
+        .block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .title(format!(" Go to… · {} ", fit(&menu.track.title, w.saturating_sub(14) as usize)))
+                .title_bottom(Line::from(" Enter choose · Esc close ").right_aligned())
+                .border_style(Style::default().fg(t.accent)),
+        )
+        .highlight_style(Style::default().bg(t.accent).fg(t.selection_fg));
+    f.render_stateful_widget(list, popup, &mut state);
+}
+
+fn draw_confirm_reject(f: &mut Frame, app: &mut App, area: Rect) {
+    let t = app.theme;
+    let Some(track) = &app.confirm_reject else { return };
+    let w = 62.min(area.width.saturating_sub(4));
+    let popup = Rect::new(area.x + area.width.saturating_sub(w) / 2, area.y + area.height.saturating_sub(6) / 2, w, 6);
+    f.render_widget(Clear, popup);
+    let inner = w.saturating_sub(4) as usize;
+    let text = Text::from(vec![
+        Line::from(Span::styled(fit(&format!("{} — {}", track.title, track.track_artist), inner), Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled("Playing the wrong song? This deletes the download and", Style::default().fg(t.muted))),
+        Line::from(Span::styled("fetches the next-best YouTube match.", Style::default().fg(t.muted))),
+        Line::from(vec![
+            Span::styled(" y ", Style::default().fg(t.selection_fg).bg(t.accent)),
+            Span::raw(" Find another   "),
+            Span::styled(" n ", Style::default().fg(t.selection_fg).bg(t.accent)),
+            Span::raw(" Keep it"),
+        ]),
+    ]);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(" Wrong song? ")
+        .border_style(Style::default().fg(t.accent));
+    f.render_widget(Paragraph::new(text).block(block), popup);
+}
+
 fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     let t = app.theme;
     let focused = app.focus == Focus::Search;
-    let block = titled(" Search (title / artist / album) ", focused, t);
+    // The box title and the placeholder share one style so they read as a
+    // pair; the placeholder says what's searched.
+    let hint = match app.tab {
+        Tab::Browser => "Search all music (Deezer · YouTube Music) — click or press /",
+        Tab::Streaming => "Search your Spotify library and playlists — click or press /",
+        _ => "Search title / artist / album — click or press /",
+    };
+    let block = titled(" Search ", focused, t);
     let inner = block.inner(area);
     app.rects.search = inner;
-    let mut spans = vec![Span::raw("🔎 ")];
+    let mut spans = vec![Span::raw(" ")];
     if app.search.is_empty() && !focused {
-        spans.push(Span::raw("Click or press / to search").fg(t.dim));
+        spans.push(Span::styled(hint, Style::default().fg(t.muted)));
     } else if !focused {
         spans.push(Span::raw(&app.search));
     } else {
@@ -359,16 +569,27 @@ const ALBUM_THUMB_COLS: u16 = 4;
 /// blank until the next frame it's ready, same as the now-playing cover does.
 fn draw_album_thumbnails(f: &mut Frame, app: &mut App) {
     let area = app.rects.albums;
+    let offset = app.album_state.offset();
+    draw_row_thumbs(f, area, offset, &app.view_albums, &mut app.row_thumb_cache);
+}
+
+/// Draw the cached thumbnail (if decoded yet) for each `ALBUM_ROW_HEIGHT`-tall
+/// row of `area` in view, keyed by `keys[row]`.
+fn draw_row_thumbs(
+    f: &mut Frame,
+    area: Rect,
+    offset: usize,
+    keys: &[crate::model::AlbumRef],
+    cache: &mut std::collections::HashMap<crate::model::AlbumRef, ratatui_image::protocol::StatefulProtocol>,
+) {
     let row_h = App::ALBUM_ROW_HEIGHT;
     if area.height < row_h || area.width <= ALBUM_THUMB_COLS {
         return;
     }
     let visible = (area.height / row_h) as usize;
-    let offset = app.album_state.offset();
-    let end = (offset + visible).min(app.view_albums.len());
+    let end = (offset + visible).min(keys.len());
     for row_i in offset..end {
-        let album = app.view_albums[row_i].clone();
-        let Some(proto) = app.row_thumb_cache.get_mut(&album) else {
+        let Some(proto) = cache.get_mut(&keys[row_i]) else {
             continue;
         };
         let y = area.y + ((row_i - offset) as u16) * row_h;
@@ -379,66 +600,108 @@ fn draw_album_thumbnails(f: &mut Frame, app: &mut App) {
 }
 
 fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
+    use crate::app::SettingRow::*;
     let t = app.theme;
-    let block = titled(" Settings ", false, t);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let dir_line = match &app.editing_path {
-        Some(buf) => Line::from(vec![
-            Span::raw("Music dir: "),
-            Span::styled(buf.clone(), Style::default().fg(t.accent)),
-            Span::styled("█", Style::default().fg(t.accent)),
-        ]),
-        None => Line::from(vec![
-            Span::raw("Music dir: "),
-            Span::styled(
-                app.config.music_dir.to_string_lossy().into_owned(),
-                Style::default().fg(t.accent),
-            ),
-        ]),
+    let on_off = |b: bool| if b { "● on" } else { "○ off" };
+    let home = directories::UserDirs::new().map(|u| u.home_dir().to_path_buf());
+    let tilde = |p: &std::path::Path| -> String {
+        match home.as_deref().and_then(|h| p.strip_prefix(h).ok()) {
+            Some(rest) => format!("~/{}", rest.display()),
+            None => p.display().to_string(),
+        }
     };
-
-    let status = match app.scanning {
-        Some((done, total)) if total > 0 => format!("Scanning… {done}/{total}"),
-        Some((done, _)) => format!("Scanning… {done} files"),
-        None => format!("{} tracks indexed.", app.library.tracks.len()),
+    let size = |b: u64| -> String {
+        match b {
+            b if b >= 1 << 30 => format!("{:.1} GB", b as f64 / (1u64 << 30) as f64),
+            b if b >= 1 << 20 => format!("{:.0} MB", b as f64 / (1u64 << 20) as f64),
+            b => format!("{} KB", b / 1024),
+        }
     };
+    let (audio, sp_covers, art) = app.cache_stats.unwrap_or_default();
+    let editing = |field: PathField| app.editing_path.as_ref().filter(|_| app.editing_field == field);
 
-    let on_off = |b: bool| if b { "on" } else { "off" };
-    let gapless = app.gapless_secs();
-    let gapless_str = if gapless <= 0.0 { "off".to_string() } else { format!("{gapless:.1}s crossfade") };
-
-    let val = |label: &str, v: &str| -> Line<'static> {
-        Line::from(vec![
-            Span::raw(format!("  {label:<26}")),
-            Span::styled(v.to_string(), Style::default().fg(t.accent)),
-        ])
-    };
-
-    let text = vec![
-        Line::raw(""),
-        dir_line,
-        Line::raw(""),
-        Line::from(status).fg(t.muted),
-        Line::raw(""),
-        val("Gapless playback",        &gapless_str),
-        val("Cache all album art",      on_off(app.cache_all_art)),
-        val("Sort \"The\" artists",     on_off(app.config.ui.sort_articles)),
-        val("Big transport icons",      on_off(app.big_icons)),
-        val("Album thumbnails",         on_off(app.show_album_thumbnails)),
-        Line::raw(""),
-        Line::from("  e    edit music directory path").fg(t.muted),
-        Line::from("  r    rescan library").fg(t.muted),
-        Line::from("  +/-  gapless fade (0 = off)").fg(t.muted),
-        Line::from("  c    cache all album art").fg(t.muted),
-        Line::from("  t    sort \"The\" artists").fg(t.muted),
-        Line::from("  k    big transport icons").fg(t.muted),
-        Line::from("  v    album thumbnails").fg(t.muted),
-        Line::raw(""),
-        Line::from(format!("  config: {}", crate::config::config_path_display())).fg(t.muted),
-    ];
-    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
+    let rows = app.settings_rows();
+    let label_w = 26;
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| {
+            // (label, value, value is accent-colored)
+            let (label, value, strong): (&str, String, bool) = match *row {
+                Header(h) => {
+                    return ListItem::new(Line::from(Span::styled(
+                        format!(" {h}"),
+                        Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+                    )));
+                }
+                MusicDir => (
+                    "Local music dir",
+                    editing(PathField::MusicDir)
+                        .map(|b| format!("{b}█"))
+                        .unwrap_or_else(|| tilde(&app.config.music_dir)),
+                    true,
+                ),
+                Rescan => (
+                    "Rescan library",
+                    match app.scanning {
+                        Some((done, total)) if total > 0 => format!("scanning… {done}/{total}"),
+                        Some((done, _)) => format!("scanning… {done} files"),
+                        None => format!("{} tracks indexed · Enter to rescan", app.library.tracks.len()),
+                    },
+                    false,
+                ),
+                LocalArtDir => ("Album-art cache", format!("{} · {}", tilde(&crate::config::art_cache_dir()), size(art.bytes)), false),
+                Gapless => {
+                    let g = app.gapless_secs();
+                    let v = if g <= 0.0 { "off".to_string() } else { format!("{g:.1}s crossfade") };
+                    ("Gapless playback", format!("◂ {v} ▸"), true)
+                }
+                KeepGoing => ("Keep playing similar songs", on_off(app.config.playback.keep_going).into(), true),
+                Thumbnails => ("Cover thumbnails", on_off(app.show_album_thumbnails).into(), true),
+                CacheAllArt => ("Pre-cache all album art", on_off(app.cache_all_art).into(), true),
+                SortArticles => ("Sort \"The\" artists", on_off(app.config.ui.sort_articles).into(), true),
+                BigIcons => ("Big transport icons", on_off(app.big_icons).into(), true),
+                TabSpotify => ("Spotify tab", on_off(app.config.spotify.enabled).into(), true),
+                TabExplore => ("Explore tab", on_off(app.config.browser.enabled).into(), true),
+                TabPlaylists => ("Local Playlists tab", on_off(app.config.ui.show_playlists_tab).into(), true),
+                SpotifyCsv => (
+                    "Export file / folder",
+                    editing(PathField::SpotifyCsv)
+                        .map(|b| format!("{b}█"))
+                        .unwrap_or_else(|| tilde(&app.config.spotify.csv)),
+                    true,
+                ),
+                SpotifyReimport => ("Re-import export", "Enter to merge in new tracks".into(), false),
+                SpotifyLinks => (
+                    "Linked playlists",
+                    format!("{} linked · Enter to add a link", app.config.spotify.links.len()),
+                    false,
+                ),
+                DownloadsDir => (
+                    "Downloaded songs",
+                    format!("{} · {} songs · {}", tilde(&crate::spotify::music_root()), audio.files, size(audio.bytes)),
+                    false,
+                ),
+                SpotifyCoversDir => (
+                    "Spotify/Explore covers",
+                    format!(
+                        "{} · {}",
+                        tilde(&crate::config::spotify_cache_dir().join("covers")),
+                        size(sp_covers.bytes)
+                    ),
+                    false,
+                ),
+                LibraryFile => ("Library file", tilde(&crate::config::streaming_store_path()), false),
+                ConfigFile => ("Config file", tilde(&crate::config::config_path()), false),
+            };
+            let value_style = if strong { Style::default().fg(t.accent) } else { Style::default().fg(t.muted) };
+            ListItem::new(Line::from(vec![
+                Span::raw(format!("   {label:<label_w$}")),
+                Span::styled(value, value_style),
+            ]))
+        })
+        .collect();
+    let title = " Settings ".to_string();
+    render_list(f, &mut app.settings_state, items, area, &title, true, &mut app.rects.settings, t, 1);
 }
 
 fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
@@ -493,7 +756,7 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
         &mut app.pl_track_state,
         titems,
         cols[1],
-        " Tracks (Enter to play · n new from queue · a append · d delete · x remove) ",
+        " Tracks ",
         tracks_focused,
         &mut app.rects.pl_tracks,
         t,
@@ -510,11 +773,352 @@ fn draw_playlists(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(name.clone(), Style::default().fg(t.accent)),
             Span::styled("█", Style::default().fg(t.accent)),
         ]);
-        let block = Block::bordered()
+        let block = Block::bordered().border_type(BorderType::Rounded)
             .title(" New playlist (Enter / Esc) ")
             .border_style(Style::default().fg(t.accent));
         f.render_widget(Paragraph::new(line).block(block), popup);
     }
+}
+
+fn draw_spotify(f: &mut Frame, app: &mut App, area: Rect) {
+    let t = app.theme;
+    let pct = app.sp_pct;
+    let cols = Layout::horizontal([Constraint::Percentage(pct), Constraint::Percentage(100 - pct)])
+        .split(area);
+    app.rects.sp_body = area;
+    app.rects.sp_div = cols[1].x;
+    let thumbs = app.show_album_thumbnails;
+    let row_h = app.sp_row_h();
+    let indent = if thumbs { " ".repeat(ALBUM_THUMB_COLS as usize + 1) } else { String::new() };
+    // Two-line rows (with thumbnails) put secondary info on the second line,
+    // like Spotify's own track list.
+    let row = |top: Line<'static>, sub: Line<'static>| -> ListItem<'static> {
+        if thumbs {
+            let mut a = vec![Span::raw(indent.clone())];
+            a.extend(top.spans);
+            let mut b = vec![Span::raw(indent.clone())];
+            b.extend(sub.spans);
+            ListItem::new(Text::from(vec![Line::from(a), Line::from(b)]))
+        } else {
+            ListItem::new(top)
+        }
+    };
+
+    let list_w = cols[0].width.saturating_sub(3) as usize;
+    let names: Vec<ListItem> = if app.sp_view.is_empty() && !app.spotify_lists.is_empty() {
+        vec![ListItem::new(Span::raw("(no matches)").fg(t.muted))]
+    } else if app.sp_view.is_empty() {
+        let why = app.spotify_error.clone().unwrap_or_else(|| "export is empty".into());
+        vec![
+            ListItem::new(Span::raw("(nothing imported)").fg(t.muted)),
+            ListItem::new(Span::raw(why).fg(t.muted)),
+            ListItem::new(Span::raw("set the path in Settings (p)").fg(t.muted)),
+        ]
+    } else {
+        app.sp_view
+            .iter()
+            .map(|p| {
+                let n = p.tracks.len();
+                if thumbs {
+                    let w = list_w.saturating_sub(indent.len());
+                    row(
+                        Line::raw(fit(&p.name, w)),
+                        Line::from(format!("{n} songs")).fg(t.muted),
+                    )
+                } else {
+                    ListItem::new(format!("{}  ({n})", p.name))
+                }
+            })
+            .collect()
+    };
+    let list_title = format!(" Library · {} ", app.sp_sort.label());
+    render_list(
+        f,
+        &mut app.sp_list_state,
+        names,
+        cols[0],
+        &list_title,
+        app.sp_focus == PlPane::List,
+        &mut app.rects.sp_list,
+        t,
+        row_h,
+    );
+
+    let tracks: Vec<crate::model::Track> = app
+        .selected_sp_list()
+        .map(|p| p.tracks.clone())
+        .unwrap_or_default();
+    let playing = app.audio.current_path().map(|p| p.to_path_buf());
+    // Only stat the cache for rows that can be on screen.
+    let first = app.sp_track_state.offset();
+    let shown = first..first + (cols[1].height / row_h) as usize;
+    // Inner width minus the scrollbar column, the thumbnail indent, the
+    // 2-cell state marker and the right-pinned length field.
+    let text_w = (cols[1].width.saturating_sub(3) as usize).saturating_sub(indent.len() + 2);
+    let titems: Vec<ListItem> = tracks
+        .iter()
+        .enumerate()
+        .map(|(i, tr)| {
+            let (mark, mark_style) = if playing.as_deref() == Some(tr.path.as_path()) {
+                ("▶ ", Style::default().fg(t.accent))
+            } else if app.fetching.contains(&tr.path) {
+                ("⇣ ", Style::default().fg(t.accent))
+            } else if shown.contains(&i) && tr.path.exists() {
+                ("● ", Style::default().fg(t.muted))
+            } else {
+                ("  ", Style::default())
+            };
+            let len = if tr.length_secs > 0 { fmt_time(tr.length_secs) } else { "--:--".into() };
+            let body_w = text_w.saturating_sub(len.chars().count() + 2);
+            if thumbs {
+                let sub = format!("{} · {}", tr.track_artist, tr.album);
+                let heart = app.liked.contains(&tr.path);
+                row(
+                    Line::from(vec![
+                        Span::styled(mark, mark_style),
+                        Span::raw(fit(&tr.title, body_w.saturating_sub(2))),
+                        Span::styled(if heart { " ♥" } else { "  " }, Style::default().fg(t.accent)),
+                        Span::styled(format!(" {len} "), Style::default().fg(t.muted)),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(fit(&sub, body_w), Style::default().fg(t.muted)),
+                    ]),
+                )
+            } else {
+                let title_w = (body_w * 4 / 10).max(10);
+                let artist_w = (body_w * 3 / 10).max(8);
+                let album_w = body_w.saturating_sub(title_w + artist_w + 1);
+                ListItem::new(Line::from(vec![
+                    Span::styled(mark, mark_style),
+                    Span::raw(fit(&tr.title, title_w)),
+                    Span::styled(format!(" {len:>5} "), Style::default().fg(t.muted)),
+                    Span::styled(fit(&tr.track_artist, artist_w), Style::default().fg(t.muted)),
+                    Span::styled(format!(" {}", fit(&tr.album, album_w)), Style::default().fg(t.muted)),
+                ]))
+            }
+        })
+        .collect();
+    render_list(
+        f,
+        &mut app.sp_track_state,
+        titems,
+        cols[1],
+        " Songs ",
+        app.sp_focus == PlPane::Tracks,
+        &mut app.rects.sp_tracks,
+        t,
+        row_h,
+    );
+
+    if thumbs {
+        let list_keys: Vec<_> = app.sp_view.iter().map(App::sp_list_thumb_key).collect();
+        let track_keys: Vec<_> = tracks.iter().map(App::sp_track_thumb_key).collect();
+        let (lr, lo) = (app.rects.sp_list, app.sp_list_state.offset());
+        let (tr, to) = (app.rects.sp_tracks, app.sp_track_state.offset());
+        draw_row_thumbs(f, lr, lo, &list_keys, &mut app.row_thumb_cache);
+        draw_row_thumbs(f, tr, to, &track_keys, &mut app.row_thumb_cache);
+    }
+}
+
+fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
+    use crate::deezer::Item;
+    let t = app.theme;
+    let pct = app.sp_pct;
+    let cols = Layout::horizontal([Constraint::Percentage(pct), Constraint::Percentage(100 - pct)])
+        .split(area);
+    app.rects.sp_body = area;
+    app.rects.sp_div = cols[1].x;
+    let thumbs = app.show_album_thumbnails;
+    let row_h = app.sp_row_h();
+    let indent = if thumbs { " ".repeat(ALBUM_THUMB_COLS as usize + 1) } else { String::new() };
+
+    let n = app.br_section_count();
+    let mut sections: Vec<ListItem> = (0..n)
+        .filter_map(|i| app.br_section(i).map(|v| (i, v)))
+        .map(|(i, v)| {
+            let r = app.br_results.len();
+            let building = app.br_radio_building.as_deref() == Some(v.title.as_str());
+            let label = if building { format!("{}  (building…)", v.title) } else { format!("{}  ({})", v.title, v.items.len()) };
+            // Search results and radios sit above the home sections; mark them apart.
+            if i < r {
+                ListItem::new(Line::from(vec![Span::styled("⌕ ", Style::default().fg(t.accent)), Span::raw(label)]))
+            } else if i < r + app.br_radios.len() {
+                ListItem::new(Line::from(vec![Span::styled("◉ ", Style::default().fg(t.accent)), Span::raw(label)]))
+            } else {
+                ListItem::new(Line::from(vec![Span::raw("  "), Span::raw(label)]))
+            }
+        })
+        .collect();
+    if sections.is_empty() {
+        sections.push(ListItem::new(Span::raw("loading…").fg(t.muted)));
+    }
+    // With an artist/album page open on the right, no sidebar entry is
+    // what's shown, so none is highlighted.
+    let mut sec_state = app.br_sec_state.clone();
+    if !app.br_stack.is_empty() {
+        sec_state.select(None);
+    }
+    render_list(
+        f,
+        &mut sec_state,
+        sections,
+        cols[0],
+        " Explore ",
+        app.br_focus == PlPane::List,
+        &mut app.rects.br_sections,
+        t,
+        1,
+    );
+    if app.br_stack.is_empty() {
+        app.br_sec_state = sec_state;
+    }
+
+    let view = app.br_current().cloned().unwrap_or_default();
+    let playing = app.audio.current_path().map(|p| p.to_path_buf());
+    let text_w = (cols[1].width.saturating_sub(3) as usize).saturating_sub(indent.len() + 2);
+    let row = |top: Vec<Span<'static>>, sub: String| -> ListItem<'static> {
+        if thumbs {
+            let mut a = vec![Span::raw(indent.clone())];
+            a.extend(top);
+            ListItem::new(Text::from(vec![
+                Line::from(a),
+                Line::from(vec![
+                    Span::raw(format!("{indent}  ")),
+                    Span::styled(fit(&sub, text_w), Style::default().fg(t.muted)),
+                ]),
+            ]))
+        } else {
+            let mut a = top;
+            a.push(Span::styled(format!("  {sub}"), Style::default().fg(t.muted)));
+            ListItem::new(Line::from(a))
+        }
+    };
+    let items: Vec<ListItem> = view
+        .items
+        .iter()
+        .map(|item| match item {
+            Item::Track(tr) => {
+                let (mark, mark_style) = if playing.as_deref() == Some(tr.path.as_path()) {
+                    ("▶ ", Style::default().fg(t.accent))
+                } else if app.fetching.contains(&tr.path) {
+                    ("⇣ ", Style::default().fg(t.accent))
+                } else {
+                    ("  ", Style::default())
+                };
+                let len = if tr.length_secs > 0 { fmt_time(tr.length_secs) } else { "--:--".into() };
+                let heart = app.liked.contains(&tr.path);
+                let title_w = text_w.saturating_sub(len.chars().count() + 4);
+                let sub = if tr.album.is_empty() {
+                    tr.track_artist.clone()
+                } else {
+                    format!("{} · {}", tr.track_artist, tr.album)
+                };
+                row(
+                    vec![
+                        Span::styled(mark, mark_style),
+                        Span::raw(fit(&tr.title, title_w)),
+                        Span::styled(if heart { " ♥" } else { "  " }, Style::default().fg(t.accent)),
+                        Span::styled(format!(" {len} "), Style::default().fg(t.muted)),
+                    ],
+                    sub,
+                )
+            }
+            Item::Album { title, artist, .. } => row(
+                vec![Span::raw("◉ "), Span::raw(fit(title, text_w))],
+                format!("Album · {artist}"),
+            ),
+            Item::Artist { name, .. } => {
+                row(vec![Span::raw("☺ "), Span::raw(fit(name, text_w))], "Artist".into())
+            }
+            Item::Playlist { title, count, .. } => row(
+                vec![Span::raw("≡ "), Span::raw(fit(title, text_w))],
+                format!("Playlist · {count} songs"),
+            ),
+        })
+        .collect();
+    let mut title = String::from(" ");
+    for v in &app.br_stack {
+        title.push_str(&v.title);
+        title.push_str(" › ");
+    }
+    if app.br_stack.is_empty() {
+        title.push_str(&view.title);
+    } else {
+        title.truncate(title.len() - " › ".len());
+    }
+    if let Some(what) = &app.br_loading {
+        title.push_str(&format!("  (loading {what})"));
+    }
+    if app.br_stack.is_empty() && app.br_radio_building.as_deref() == Some(view.title.as_str()) {
+        title.push_str("  (building — about 20 s)");
+    }
+    title.push(' ');
+    render_list(
+        f,
+        &mut app.br_item_state,
+        items,
+        cols[1],
+        &title,
+        app.br_focus == PlPane::Tracks,
+        &mut app.rects.br_items,
+        t,
+        row_h,
+    );
+
+    if thumbs {
+        let mut keys = Vec::with_capacity(view.items.len());
+        for i in &view.items {
+            keys.push(App::br_item_thumb(i).0);
+        }
+        let (r, o) = (app.rects.br_items, app.br_item_state.offset());
+        draw_row_thumbs(f, r, o, &keys, &mut app.row_thumb_cache);
+    }
+}
+
+/// The `m` "add to playlist" popup, centered over the body.
+fn draw_add_menu(f: &mut Frame, app: &mut App, area: Rect) {
+    let t = app.theme;
+    let targets = app.add_targets();
+    let Some(menu) = &app.add_menu else { return };
+    let what = match menu.tracks.as_slice() {
+        [one] => format!("'{}'", one.title),
+        many => format!("{} tracks", many.len()),
+    };
+    let w = 56.min(area.width.saturating_sub(4));
+    let h = (targets.len() as u16 + 2).min(area.height.saturating_sub(2)).max(3);
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(w) / 2,
+        area.y + area.height.saturating_sub(h) / 2,
+        w,
+        h,
+    );
+    f.render_widget(Clear, popup);
+    if let Some(name) = &menu.naming {
+        let popup = Rect::new(popup.x, popup.y, w, 3);
+        f.render_widget(Clear, popup);
+        let line = Line::from(vec![
+            Span::raw("Name: "),
+            Span::styled(name.clone(), Style::default().fg(t.accent)),
+            Span::styled("█", Style::default().fg(t.accent)),
+        ]);
+        let block = Block::bordered().border_type(BorderType::Rounded)
+            .title(" New playlist (Enter / Esc) ")
+            .border_style(Style::default().fg(t.accent));
+        f.render_widget(Paragraph::new(line).block(block), popup);
+        return;
+    }
+    let items: Vec<ListItem> = targets.iter().map(|(label, _)| ListItem::new(label.clone())).collect();
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(menu.sel));
+    let list = List::new(items)
+        .block(
+            Block::bordered().border_type(BorderType::Rounded)
+                .title(format!(" Add {what} to… (Enter / Esc) "))
+                .border_style(Style::default().fg(t.accent)),
+        )
+        .highlight_style(Style::default().bg(t.accent).fg(t.selection_fg));
+    f.render_stateful_widget(list, popup, &mut state);
 }
 
 fn draw_seekbar(f: &mut Frame, app: &mut App, area: Rect) {
@@ -622,6 +1226,7 @@ fn draw_art(f: &mut Frame, app: &mut App, area: Rect) {
         let placeholder = Paragraph::new("\n♪").alignment(Alignment::Center).block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(t.border)),
         );
         f.render_widget(placeholder, area);
@@ -728,7 +1333,7 @@ fn draw_help(f: &mut Frame, area: Rect, t: Theme) {
                     ("i", "album art popup"),
                     ("q / ^C", "quit"),
                     ("Tab", "cycle focus"),
-                    ("1/2/3", "browser/playlists/settings"),
+                    ("1-5", "switch tab"),
                 ],
             ),
             (
@@ -768,6 +1373,8 @@ fn draw_help(f: &mut Frame, area: Rect, t: Theme) {
                     ("n / p", "next / prev"),
                     ("s", "shuffle"),
                     ("r", "repeat off/all/one"),
+                    ("g", "go to: radio/artist/album"),
+                    ("G", "keep going on/off"),
                     ("+ / -", "volume"),
                     ("[ / ]", "seek −/+ 5s"),
                 ],
@@ -788,6 +1395,22 @@ fn draw_help(f: &mut Frame, area: Rect, t: Theme) {
                     ("d", "delete playlist"),
                     ("x", "remove track"),
                     ("Enter", "play"),
+                ],
+            ),
+            (
+                "Spotify / Explore",
+                &[
+                    ("Enter", "play / open"),
+                    ("f", "like / unlike"),
+                    ("m", "add to playlist…"),
+                    ("⌫ / Esc", "back (Explore)"),
+                    ("u / d", "link list / remove"),
+                    ("a", "queue track / list"),
+                    ("x", "wrong song? re-match"),
+                    ("Tab", "switch pane"),
+                    ("S", "save list (Explore)"),
+                    ("o", "cycle sort order"),
+                    ("R", "re-import CSV"),
                 ],
             ),
             (
@@ -813,7 +1436,7 @@ fn draw_help(f: &mut Frame, area: Rect, t: Theme) {
         h,
     );
     f.render_widget(Clear, popup);
-    let block = Block::bordered()
+    let block = Block::bordered().border_type(BorderType::Rounded)
         .title(" Help ")
         .border_style(Style::default().fg(t.accent));
     let inner = block.inner(popup);
@@ -890,7 +1513,7 @@ fn titled(title: &str, focused: bool, t: Theme) -> Block<'_> {
     } else {
         Style::default().fg(t.muted)
     };
-    Block::bordered()
+    Block::bordered().border_type(BorderType::Rounded)
         .title(Span::styled(title, title_style))
         .border_style(border_style(focused, t))
 }

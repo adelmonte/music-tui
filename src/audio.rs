@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 
 /// A track being faded out, with the gain it had when its fade began.
 struct Outgoing {
@@ -64,9 +64,15 @@ impl Audio {
         self.crossfade_secs = secs.max(0.0);
     }
 
-    fn decode(path: &Path) -> Result<Decoder<std::io::BufReader<File>>> {
+    fn decode(path: &Path) -> Result<Box<dyn Source + Send>> {
+        if crate::opus::is_ogg(path)
+            && let Ok(src) = crate::opus::OpusSource::open(path)
+        {
+            return Ok(Box::new(src));
+        }
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        Decoder::try_from(file).with_context(|| format!("decoding {}", path.display()))
+        let dec = Decoder::try_from(file).with_context(|| format!("decoding {}", path.display()))?;
+        Ok(Box::new(dec))
     }
 
     fn fading(&self) -> bool {

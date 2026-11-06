@@ -67,7 +67,7 @@ pub fn scan_dir(root: &Path, mut progress: impl FnMut(usize, usize)) -> Vec<Trac
     tracks
 }
 
-fn read_track(path: &Path) -> Option<Track> {
+pub fn read_track(path: &Path) -> Option<Track> {
     let tagged = Probe::open(path).ok()?.read().ok()?;
     let duration = tagged.properties().duration().as_secs();
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag());
@@ -206,6 +206,12 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).ok();
     }
+}
+
+/// A file's playback length in whole seconds, from its container properties.
+pub fn read_length(path: &Path) -> Option<u64> {
+    let tagged = Probe::open(path).ok()?.read().ok()?;
+    Some(tagged.properties().duration().as_secs())
 }
 
 /// Reads embedded cover art bytes from a file's tags, if present.

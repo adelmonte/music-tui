@@ -24,6 +24,56 @@ pub struct Config {
     /// UI options.
     #[serde(default)]
     pub ui: UiConfig,
+    /// Streaming tab (Spotify export + linked playlists).
+    #[serde(default)]
+    pub spotify: SpotifyConfig,
+    /// Browser (music discovery) tab.
+    #[serde(default)]
+    pub browser: BrowserConfig,
+}
+
+/// Browser tab options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Spotify tab options. The tab reads a CSV export of the user's Spotify
+/// library (no account login) and plays each track via a YouTube lookup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpotifyConfig {
+    /// Show the Spotify tab.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The export to read: one CSV file, or a directory of CSVs (e.g. an
+    /// unzipped Exportify "Export All").
+    #[serde(default = "default_spotify_csv")]
+    pub csv: PathBuf,
+    /// Spotify playlist links (e.g. Discover Weekly, Release Radar) re-read
+    /// anonymously from their public embed pages on every launch.
+    #[serde(default)]
+    pub links: Vec<String>,
+}
+
+fn default_spotify_csv() -> PathBuf {
+    default_music_dir().join("spotify-export")
+}
+
+impl Default for SpotifyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            csv: default_spotify_csv(),
+            links: Vec::new(),
+        }
+    }
 }
 
 /// UI options.
@@ -43,6 +93,9 @@ pub struct UiConfig {
     /// Show a small cover thumbnail next to every album in the Albums column.
     #[serde(default = "default_true")]
     pub show_album_thumbnails: bool,
+    /// Show the Local Playlists tab.
+    #[serde(default = "default_true")]
+    pub show_playlists_tab: bool,
 }
 
 fn default_true() -> bool {
@@ -56,6 +109,7 @@ impl Default for UiConfig {
             cache_all_art: false,
             sort_articles: true,
             show_album_thumbnails: default_true(),
+            show_playlists_tab: default_true(),
         }
     }
 }
@@ -67,6 +121,10 @@ pub struct PlaybackConfig {
     /// Accepts the old `crossfade_secs` name for backwards compatibility.
     #[serde(default = "default_gapless", alias = "crossfade_secs")]
     pub gapless_fade_secs: f64,
+    /// When the queue is about to run out, append a song radio built from
+    /// the playing track.
+    #[serde(default)]
+    pub keep_going: bool,
 }
 
 fn default_gapless() -> f64 {
@@ -77,6 +135,7 @@ impl Default for PlaybackConfig {
     fn default() -> Self {
         Self {
             gapless_fade_secs: default_gapless(),
+            keep_going: false,
         }
     }
 }
@@ -90,6 +149,13 @@ pub struct LayoutConfig {
     /// Height percentage of the queue panel within the third column.
     #[serde(default = "default_queue_pct")]
     pub queue_pct: u16,
+    /// Width percentage of the list pane in the Spotify tab.
+    #[serde(default = "default_spotify_pct")]
+    pub spotify_pct: u16,
+}
+
+fn default_spotify_pct() -> u16 {
+    26
 }
 
 fn default_columns() -> Vec<u16> {
@@ -105,6 +171,7 @@ impl Default for LayoutConfig {
         Self {
             columns: default_columns(),
             queue_pct: default_queue_pct(),
+            spotify_pct: default_spotify_pct(),
         }
     }
 }
@@ -173,6 +240,8 @@ impl Default for Config {
             layout: LayoutConfig::default(),
             playback: PlaybackConfig::default(),
             ui: UiConfig::default(),
+            spotify: SpotifyConfig::default(),
+            browser: BrowserConfig::default(),
         }
     }
 }
@@ -276,6 +345,30 @@ pub fn playlists_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("music-tui-playlists.toml"))
 }
 
+/// The Streaming tab's library (imported lists plus likes and additions),
+/// e.g. ~/.local/share/music-tui/streaming.toml.
+pub fn streaming_store_path() -> PathBuf {
+    project_dirs()
+        .map(|d| d.data_dir().join("streaming.toml"))
+        .unwrap_or_else(|| PathBuf::from("music-tui-streaming.toml"))
+}
+
+/// Saved playback/UI state for resuming where the last run left off, e.g.
+/// ~/.local/share/music-tui/session.toml.
+pub fn session_path() -> PathBuf {
+    project_dirs()
+        .map(|d| d.data_dir().join("session.toml"))
+        .unwrap_or_else(|| PathBuf::from("music-tui-session.toml"))
+}
+
+/// Which YouTube video each Spotify track was matched to, and which ones the
+/// user rejected, e.g. ~/.local/share/music-tui/spotify_matches.toml.
+pub fn spotify_matches_path() -> PathBuf {
+    project_dirs()
+        .map(|d| d.data_dir().join("spotify_matches.toml"))
+        .unwrap_or_else(|| PathBuf::from("music-tui-spotify-matches.toml"))
+}
+
 /// Directory for cached cover-art thumbnails, e.g. ~/.cache/music-tui/covers.
 pub fn art_cache_dir() -> PathBuf {
     project_dirs()
@@ -283,20 +376,23 @@ pub fn art_cache_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("music-tui-art-cache"))
 }
 
+/// Cache root for the Spotify tab (fetched audio and covers), e.g.
+/// ~/.cache/music-tui/spotify.
+pub fn spotify_cache_dir() -> PathBuf {
+    project_dirs()
+        .map(|d| d.cache_dir().join("spotify"))
+        .unwrap_or_else(|| PathBuf::from("music-tui-spotify-cache"))
+}
+
 /// Pre-0.1.3 per-track PNG thumbnail directory, deleted on startup.
 pub fn legacy_art_cache_dir() -> Option<PathBuf> {
     project_dirs().map(|d| d.cache_dir().join("art"))
 }
 
-fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     project_dirs()
         .map(|d| d.config_dir().join("config.toml"))
         .unwrap_or_else(|| PathBuf::from("music-tui-config.toml"))
-}
-
-/// The config file path as a display string, shown in the Settings tab.
-pub fn config_path_display() -> String {
-    config_path().to_string_lossy().into_owned()
 }
 
 impl Config {
@@ -380,6 +476,11 @@ impl Config {
             {
                 layout["queue_pct"] = toml_edit::value(self.layout.queue_pct as i64);
             }
+            if layout.get("spotify_pct").and_then(|i| i.as_integer())
+                != Some(self.layout.spotify_pct as i64)
+            {
+                layout["spotify_pct"] = toml_edit::value(self.layout.spotify_pct as i64);
+            }
         }
 
         if let Some(playback) = doc["playback"].or_insert(toml_edit::table()).as_table_mut() {
@@ -387,6 +488,9 @@ impl Config {
                 != Some(self.playback.gapless_fade_secs)
             {
                 playback["gapless_fade_secs"] = toml_edit::value(self.playback.gapless_fade_secs);
+            }
+            if playback.get("keep_going").and_then(|i| i.as_bool()) != Some(self.playback.keep_going) {
+                playback["keep_going"] = toml_edit::value(self.playback.keep_going);
             }
             playback.remove("crossfade_secs"); // migrate the old key name
         }
@@ -408,6 +512,30 @@ impl Config {
             {
                 ui["show_album_thumbnails"] = toml_edit::value(self.ui.show_album_thumbnails);
             }
+            if ui.get("show_playlists_tab").and_then(|i| i.as_bool()) != Some(self.ui.show_playlists_tab) {
+                ui["show_playlists_tab"] = toml_edit::value(self.ui.show_playlists_tab);
+            }
+        }
+
+        if let Some(sp) = doc["spotify"].or_insert(toml_edit::table()).as_table_mut() {
+            if sp.get("enabled").and_then(|i| i.as_bool()) != Some(self.spotify.enabled) {
+                sp["enabled"] = toml_edit::value(self.spotify.enabled);
+            }
+            set_str(sp, "csv", &self.spotify.csv.to_string_lossy());
+            let current: Option<Vec<&str>> = sp
+                .get("links")
+                .and_then(|i| i.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect());
+            let want: Vec<&str> = self.spotify.links.iter().map(String::as_str).collect();
+            if current.as_deref() != Some(want.as_slice()) {
+                sp["links"] = toml_edit::value(want.into_iter().collect::<toml_edit::Array>());
+            }
+        }
+
+        if let Some(br) = doc["browser"].or_insert(toml_edit::table()).as_table_mut()
+            && br.get("enabled").and_then(|i| i.as_bool()) != Some(self.browser.enabled)
+        {
+            br["enabled"] = toml_edit::value(self.browser.enabled);
         }
 
         doc.to_string()
