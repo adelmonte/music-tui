@@ -48,7 +48,7 @@ Spotify, YouTube, or Deezer account is needed.
 The Spotify and Explore tabs need these on your `PATH`:
 
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp): finds and downloads songs
-- [`ffmpeg`](https://ffmpeg.org/): used by yt-dlp to unpack the audio
+- [`ffmpeg`](https://ffmpeg.org/): writes the audio out as it downloads, so songs play right away
 
 On Arch: `sudo pacman -S yt-dlp ffmpeg`. The local library works without them.
 
@@ -155,7 +155,7 @@ downloaded with `yt-dlp`, and Explore uses Deezer's public API.
 4. Open the **Spotify** tab. The export is imported on first launch.
 
 To pick up songs you add on Spotify later, export again, replace the folder's contents, and
-press `R` in the Spotify tab (or Settings → Spotify → Re-import export). New songs are added to the
+use Settings → Spotify → Re-import export. New songs are added to the
 existing lists. Likes, songs you added and lists you made in music-tui are kept.
 
 A single [TuneMyMusic](https://www.tunemymusic.com/) CSV export works too: point the
@@ -171,7 +171,9 @@ name. Only the first 100 songs of a linked playlist are read.
 
 The first time you play a song, music-tui finds it on YouTube Music and downloads YouTube's
 best audio stream (Opus, about 140 kbps). It prefers plain audio uploads to music videos
-and live or remixed versions. The next song in the queue is fetched ahead of time. If a
+and live or remixed versions. A song starts playing once a few seconds have downloaded,
+and the next song in the queue is fetched ahead of time. Downloads always finish, even
+if you skip the song or close music-tui; anything cut off is picked up on the next launch. If a
 match is wrong, press `x` on the song to reject that video and fetch the next-best one.
 
 Downloads are tagged (title, artists, album artist, album, track number, year, ISRC, and
@@ -211,8 +213,9 @@ fallback). The home page is rebuilt from your likes every launch:
 - **New releases for you**: albums, EPs and singles from the last four months by artists
   you like
 - **Top songs**, **Top albums**, and **Popular playlists** from Deezer's charts
- `Enter` plays a song or opens an album/artist/playlist, `Backspace`/`Esc` goes back,
-and `f`, `m`, `a`, and `x` work as in the Spotify tab. `S` saves the open list as a playlist
+
+`Enter` plays a song or opens an album/artist/playlist, `Backspace`/`Esc` goes back,
+and `l`, `m`, `a`, and `x` work as in the Spotify tab. `S` saves the open list as a playlist
 in your Spotify-tab library.
 
 ### Song radio
