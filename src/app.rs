@@ -19,6 +19,8 @@ use crate::deezer;
 use crate::spotify;
 
 mod actions;
+mod streams;
+pub use streams::is_station;
 
 /// Everything Tab can land on. `Search` is the text field; the rest are the
 /// browseable lists. Mouse hit-testing and column movement only concern the
@@ -66,16 +68,25 @@ pub enum Tab {
     Local,
     Streaming,
     Browser,
+    Radio,
+    Podcasts,
     Playlists,
     Settings,
 }
 
 impl Tab {
+    /// Tabs built like Explore: sections on the left, items on the right.
+    pub fn browse(self) -> bool {
+        matches!(self, Tab::Browser | Tab::Radio | Tab::Podcasts)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Tab::Local => "Local",
             Tab::Streaming => "Spotify",
             Tab::Browser => "Explore",
+            Tab::Radio => "Radio",
+            Tab::Podcasts => "Podcasts",
             Tab::Playlists => "Local Playlists",
             Tab::Settings => "Settings",
         }
@@ -170,10 +181,13 @@ pub enum SettingRow {
     BigIcons,
     TabSpotify,
     TabExplore,
+    TabRadio,
+    TabPodcasts,
     TabPlaylists,
     SharedSearch,
     VimKeys,
     ShowHints,
+    PodcastSpeed,
     SpotifyCsv,
     SpotifyReimport,
     SpotifyLinks,
@@ -542,6 +556,18 @@ pub struct App {
     br_seen: (String, Instant),
     br_tx: Sender<BrMsg>,
     br_rx: Receiver<BrMsg>,
+    /// Which browse tab's state is in the `br_*` fields; the others wait in
+    /// `br_stashes`.
+    br_mode: Tab,
+    br_stashes: HashMap<Tab, streams::BrStash>,
+    /// Radio and Podcasts results, tagged with their tab.
+    alt_tx: Sender<(Tab, BrMsg)>,
+    alt_rx: Receiver<(Tab, BrMsg)>,
+    pub radio_favs: Vec<Track>,
+    pub pods: crate::podcast::Store,
+    pods_dirty: bool,
+    /// The live song last shown for the playing station.
+    stream_title_seen: Option<String>,
 
     pub artist_state: ListState,
     pub album_state: ListState,
@@ -649,11 +675,14 @@ impl App {
         let show_album_thumbnails = config.ui.show_album_thumbnails;
         let playlists = playlist::load();
         let (keymap, key_problems) = crate::keys::Keymap::new(&config.keys, config.ui.vim_keys);
+        let mut audio = audio;
+        audio.set_speed(config.podcasts.speed);
         let (art_tx, art_rx) = channel::<ArtMsg>();
         let (row_thumb_tx, row_thumb_rx) = channel::<RowThumbMsg>();
         let (fetch_tx, fetch_rx) = channel::<FetchMsg>();
         let (link_tx, link_rx) = channel::<LinkMsg>();
         let (br_tx, br_rx) = channel::<BrMsg>();
+        let (alt_tx, alt_rx) = channel::<(Tab, BrMsg)>();
         let mut app = App {
             config,
             theme,
@@ -713,6 +742,14 @@ impl App {
             br_seen: (String::new(), Instant::now()),
             br_tx,
             br_rx,
+            br_mode: Tab::Browser,
+            br_stashes: HashMap::new(),
+            alt_tx,
+            alt_rx,
+            radio_favs: crate::radio::load_favorites(),
+            pods: crate::podcast::Store::load(),
+            pods_dirty: false,
+            stream_title_seen: None,
             artist_state: ListState::default(),
             album_state: ListState::default(),
             track_state: ListState::default(),
@@ -810,7 +847,7 @@ impl App {
             shuffle: self.shuffle,
             repeat: format!("{:?}", self.repeat),
             search: self.search_for(Tab::Local),
-            searches: [Tab::Local, Tab::Streaming, Tab::Browser, Tab::Playlists]
+            searches: [Tab::Local, Tab::Streaming, Tab::Browser, Tab::Radio, Tab::Podcasts, Tab::Playlists]
                 .into_iter()
                 .map(|t| (format!("{t:?}"), self.search_for(t)))
                 .filter(|(_, q)| !q.is_empty())
@@ -829,6 +866,8 @@ impl App {
     /// Write the session (only when it changed). Called on quit, and every
     /// few seconds from `on_tick` so a killed terminal loses little.
     pub fn save_session(&mut self) {
+        self.note_progress();
+        self.save_pods();
         let Ok(body) = toml::to_string(&self.session()) else { return };
         if body == self.last_session {
             return;
@@ -852,6 +891,9 @@ impl App {
         };
         if let Some(tab) = self.tabs().into_iter().find(|t| format!("{t:?}") == s.tab) {
             self.tab = tab;
+            if tab.browse() {
+                self.br_switch(tab);
+            }
         }
         // Each tab's own search (older sessions had one, the Local tab's).
         let mut searches = s.searches.clone();
@@ -859,7 +901,7 @@ impl App {
             searches.insert("Local".into(), s.search.clone());
         }
         for (name, q) in searches {
-            if let Some(tab) = [Tab::Local, Tab::Streaming, Tab::Browser, Tab::Playlists]
+            if let Some(tab) = [Tab::Local, Tab::Streaming, Tab::Browser, Tab::Radio, Tab::Podcasts, Tab::Playlists]
                 .into_iter()
                 .find(|t| format!("{t:?}") == name)
             {
@@ -1217,7 +1259,7 @@ impl App {
                     order.push(Stop::F(Focus::Queue));
                 }
             }
-            Tab::Streaming | Tab::Browser => {
+            Tab::Streaming | Tab::Browser | Tab::Radio | Tab::Podcasts => {
                 order.extend([PlPane::List, PlPane::Tracks].map(Stop::P));
                 if queue {
                     order.push(Stop::P(PlPane::Queue));
@@ -1231,7 +1273,7 @@ impl App {
             (_, f @ (Focus::Search | Focus::Seekbar | Focus::Transport | Focus::Volume)) => Stop::F(f),
             (Tab::Local, f) => Stop::F(f),
             (Tab::Streaming, _) => Stop::P(self.sp_focus),
-            (Tab::Browser, _) => Stop::P(self.br_focus),
+            (Tab::Browser | Tab::Radio | Tab::Podcasts, _) => Stop::P(self.br_focus),
             (Tab::Playlists, _) => Stop::P(self.pl_focus),
             (Tab::Settings, _) => Stop::P(PlPane::List),
         };
@@ -1243,7 +1285,7 @@ impl App {
                 self.focus = Focus::Tracks;
                 match self.tab {
                     Tab::Streaming => self.sp_focus = p,
-                    Tab::Browser => self.br_focus = p,
+                    Tab::Browser | Tab::Radio | Tab::Podcasts => self.br_focus = p,
                     Tab::Playlists => self.pl_focus = p,
                     _ => {}
                 }
@@ -1442,6 +1484,7 @@ impl App {
         let Some(track) = self.queue.get(i).cloned() else {
             return;
         };
+        self.note_progress();
         // A Spotify track without audio yet: fetch it first. Whatever is
         // playing keeps going until it arrives, then `poll_fetch` comes back
         // here and fades into it.
@@ -1481,6 +1524,7 @@ impl App {
                 self.set_now_playing(&track);
                 self.request_art(track.path.clone());
                 self.prefetch_next();
+                self.on_track_started(&track);
             }
             Err(e) => {
                 self.status = format!("Error: {e}");
@@ -1498,6 +1542,12 @@ impl App {
         }
         if self.config.browser.enabled {
             tabs.push(Tab::Browser);
+        }
+        if self.config.radio.enabled {
+            tabs.push(Tab::Radio);
+        }
+        if self.config.podcasts.enabled {
+            tabs.push(Tab::Podcasts);
         }
         if self.config.ui.show_playlists_tab {
             tabs.push(Tab::Playlists);
@@ -1518,6 +1568,9 @@ impl App {
             self.search_cursor = self.search.chars().count();
         }
         self.tab = tab;
+        if tab.browse() {
+            self.br_switch(tab);
+        }
     }
 
     /// The search text that applies to `tab`.
@@ -1783,6 +1836,11 @@ impl App {
 
     /// `f`: like/unlike the current track in the Streaming or Browser tab.
     pub fn like_current(&mut self) {
+        match self.tab {
+            Tab::Radio => return self.radio_toggle_favorite(),
+            Tab::Podcasts => return self.pod_toggle(),
+            _ => {}
+        }
         let track = match self.tab {
             Tab::Browser => self.br_target_track(),
             Tab::Local => self.local_target_track(),
@@ -1806,8 +1864,8 @@ impl App {
                 }
                 _ => self.local_target_track().into_iter().collect(),
             },
-            (Tab::Browser, PlPane::List, _) => self.br_current().map(|v| v.tracks()).unwrap_or_default(),
-            (Tab::Browser, ..) => self.br_target_track().into_iter().collect(),
+            (Tab::Browser | Tab::Radio | Tab::Podcasts, PlPane::List, _) => self.br_current().map(|v| v.tracks()).unwrap_or_default(),
+            (Tab::Browser | Tab::Radio | Tab::Podcasts, ..) => self.br_target_track().into_iter().collect(),
             (_, _, PlPane::List) => self.selected_sp_list().map(|p| p.tracks.clone()).unwrap_or_default(),
             _ => self.sp_target_track().into_iter().collect(),
         };
@@ -1992,6 +2050,36 @@ impl App {
         self.notify(format!("Explore tab {}.", if self.config.browser.enabled { "on" } else { "off" }));
     }
 
+    /// The Radio and Podcasts tabs' switches.
+    pub fn toggle_tab(&mut self, tab: Tab) {
+        let on = match tab {
+            Tab::Radio => &mut self.config.radio.enabled,
+            Tab::Podcasts => &mut self.config.podcasts.enabled,
+            _ => return,
+        };
+        *on = !*on;
+        let on = *on;
+        let _ = self.config.save();
+        if !on && self.tab == tab {
+            self.set_tab(Tab::Settings);
+        }
+        self.notify(format!("{} tab {}.", tab.label(), if on { "on" } else { "off" }));
+    }
+
+    /// Podcast speed, in steps; applies to the playing episode at once.
+    pub fn adjust_speed(&mut self, delta: f32) {
+        let mut s = self.config.podcasts.speed + delta;
+        // Enter cycles: past the top it wraps to 1×.
+        if delta > 0.2 && s > 3.0 + 0.01 {
+            s = 1.0;
+        }
+        let s = ((s.clamp(0.5, 3.0)) * 20.0).round() / 20.0;
+        self.config.podcasts.speed = s;
+        self.audio.set_speed(s);
+        let _ = self.config.save();
+        self.notify(format!("Podcast speed {}.", fmt_speed(s)));
+    }
+
     pub fn toggle_playlists_tab(&mut self) {
         self.config.ui.show_playlists_tab = !self.config.ui.show_playlists_tab;
         let _ = self.config.save();
@@ -2024,8 +2112,12 @@ impl App {
             Header("Tabs"),
             TabSpotify,
             TabExplore,
+            TabRadio,
+            TabPodcasts,
             TabPlaylists,
             SharedSearch,
+            Header("Podcasts"),
+            PodcastSpeed,
             Header("Keys"),
             VimKeys,
             ShowHints,
@@ -2079,6 +2171,9 @@ impl App {
             BigIcons => self.toggle_big_icons(),
             TabSpotify => self.toggle_spotify(),
             TabExplore => self.toggle_browser(),
+            TabRadio => self.toggle_tab(Tab::Radio),
+            TabPodcasts => self.toggle_tab(Tab::Podcasts),
+            PodcastSpeed => self.adjust_speed(0.25),
             TabPlaylists => self.toggle_playlists_tab(),
             SharedSearch => self.toggle_shared_search(),
             VimKeys => self.toggle_vim_keys(),
@@ -2109,6 +2204,7 @@ impl App {
     pub fn settings_adjust(&mut self, delta: i32) {
         match self.selected_setting() {
             Some(SettingRow::Gapless) => self.adjust_gapless(0.5 * delta as f64),
+            Some(SettingRow::PodcastSpeed) => self.adjust_speed(0.1 * delta as f32),
             Some(SettingRow::KeepGoing) => self.toggle_keep_going(),
             Some(
                 SettingRow::CacheAllArt
@@ -2117,6 +2213,8 @@ impl App {
                 | SettingRow::BigIcons
                 | SettingRow::TabSpotify
                 | SettingRow::TabExplore
+                | SettingRow::TabRadio
+                | SettingRow::TabPodcasts
                 | SettingRow::TabPlaylists
                 | SettingRow::SharedSearch
                 | SettingRow::VimKeys
@@ -2179,6 +2277,9 @@ impl App {
             return;
         }
         self.br_home_requested = true;
+        if self.br_mode != Tab::Browser {
+            return self.ensure_stream_home();
+        }
         self.br_loading = Some("charts".into());
         let tx = self.br_tx.clone();
         std::thread::spawn(move || {
@@ -2196,7 +2297,8 @@ impl App {
     fn upsert_home(&mut self, view: deezer::View) {
         fn rank(title: &str) -> u8 {
             match title {
-                "For you" => 0,
+                "For you" | "Favorites" | "New episodes" => 0,
+                "Subscriptions" => 1,
                 t if t.starts_with("Because you liked") => 1,
                 "New releases for you" => 2,
                 _ => 3,
@@ -2328,6 +2430,9 @@ impl App {
             return;
         }
         self.br_loading = Some(format!("“{q}”"));
+        if self.br_mode != Tab::Browser {
+            return self.stream_search(q);
+        }
         let tx = self.br_tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(match deezer::search(&q) {
@@ -2341,52 +2446,59 @@ impl App {
         let mut changed = false;
         while let Ok(msg) = self.br_rx.try_recv() {
             changed = true;
-            match msg {
-                BrMsg::Home(views) => {
-                    self.br_loading = None;
-                    for v in views {
-                        self.upsert_home(v);
-                    }
-                }
-                BrMsg::ForYou(view) => self.upsert_home(view),
-                BrMsg::Results(q, views) => {
-                    if q != self.br_query {
-                        continue;
-                    }
-                    self.br_loading = None;
-                    self.br_results = views;
-                    self.br_stack.clear();
-                    self.br_sec_state = ListState::default();
-                    self.br_sec_state.select(Some(0));
-                    self.br_item_state = ListState::default();
-                    self.br_item_state.select(Some(0));
-                    if self.br_results.is_empty() {
-                        self.notify(format!("No results for “{q}”."));
-                    }
-                }
-                BrMsg::Opened(view) => {
-                    self.br_loading = None;
-                    self.br_stack.push(view);
-                    self.br_item_state = ListState::default();
-                    self.br_item_state.select(Some(0));
-                    self.br_focus = PlPane::Tracks;
-                }
-                BrMsg::Radio { view, extend } => self.on_radio(view, extend),
-                BrMsg::RadioFailed { title, error, extend } => self.on_radio_failed(title, error, extend),
-                BrMsg::Error(e) => {
-                    self.br_loading = None;
-                    self.radio_extending = false;
-                    self.notify(e);
-                }
-            }
+            self.in_mode(Tab::Browser, |app| app.handle_br(msg));
         }
-        if changed {
-            let sections = self.br_section_count();
-            clamp(&mut self.br_sec_state, sections);
-            let n = self.br_current().map(|v| v.items.len()).unwrap_or(0);
-            clamp(&mut self.br_item_state, n);
+        while let Ok((mode, msg)) = self.alt_rx.try_recv() {
+            changed = true;
+            self.in_mode(mode, |app| app.handle_br(msg));
         }
         changed
+    }
+
+    /// One result for the browse tab whose state is in the `br_*` fields.
+    fn handle_br(&mut self, msg: BrMsg) {
+        match msg {
+            BrMsg::Home(views) => {
+                self.br_loading = None;
+                for v in views {
+                    self.upsert_home(v);
+                }
+            }
+            BrMsg::ForYou(view) => self.upsert_home(view),
+            BrMsg::Results(q, views) => {
+                if q != self.br_query {
+                    return;
+                }
+                self.br_loading = None;
+                self.br_results = views;
+                self.br_stack.clear();
+                self.br_sec_state = ListState::default();
+                self.br_sec_state.select(Some(0));
+                self.br_item_state = ListState::default();
+                self.br_item_state.select(Some(0));
+                if self.br_results.is_empty() {
+                    self.notify(format!("No results for “{q}”."));
+                }
+            }
+            BrMsg::Opened(view) => {
+                self.br_loading = None;
+                self.br_stack.push(view);
+                self.br_item_state = ListState::default();
+                self.br_item_state.select(Some(0));
+                self.br_focus = PlPane::Tracks;
+            }
+            BrMsg::Radio { view, extend } => self.on_radio(view, extend),
+            BrMsg::RadioFailed { title, error, extend } => self.on_radio_failed(title, error, extend),
+            BrMsg::Error(e) => {
+                self.br_loading = None;
+                self.radio_extending = false;
+                self.notify(e);
+            }
+        }
+        let sections = self.br_section_count();
+        clamp(&mut self.br_sec_state, sections);
+        let n = self.br_current().map(|v| v.items.len()).unwrap_or(0);
+        clamp(&mut self.br_item_state, n);
     }
 
     pub fn br_move(&mut self, delta: i32) {
@@ -2417,7 +2529,7 @@ impl App {
         match self.tab {
             Tab::Local => self.focus == Focus::Queue,
             Tab::Streaming => self.sp_focus == PlPane::Queue,
-            Tab::Browser => self.br_focus == PlPane::Queue,
+            Tab::Browser | Tab::Radio | Tab::Podcasts => self.br_focus == PlPane::Queue,
             _ => false,
         }
     }
@@ -2472,12 +2584,15 @@ impl App {
             return;
         };
         let open = match item {
+            // A station or an episode plays on its own.
+            deezer::Item::Track(t) if self.tab != Tab::Browser => return self.play_tracks(vec![t], 0),
             deezer::Item::Track(t) => {
                 let tracks = view.tracks();
                 let start = tracks.iter().position(|x| x.path == t.path).unwrap_or(0);
                 self.play_tracks(tracks, start);
                 return;
             }
+            deezer::Item::Show(show) => return self.pod_open(show),
             deezer::Item::Album { id, title, .. } => deezer::Open::Album(id, title),
             deezer::Item::Artist { id, name, .. } => deezer::Open::Artist(id, name),
             deezer::Item::Playlist { id, title, .. } => deezer::Open::Playlist(id, title),
@@ -2541,6 +2656,7 @@ impl App {
     /// `g`: open the "Go to…" menu for the target track.
     pub fn open_goto_menu(&mut self) {
         match self.radio_target() {
+            Some(t) if crate::stream::is_url(&t.path) => self.notify("Song radio and Go to are for songs, not stations or episodes."),
             Some(track) => self.goto_menu = Some(GotoMenu { track, sel: 0 }),
             None => self.notify("Highlight a song first."),
         }
@@ -2728,7 +2844,8 @@ impl App {
         }
         let Some(i) = self.now else { return };
         let Some(cur) = self.queue.get(i) else { return };
-        if i + 1 < self.queue.len() || self.radio_seed.as_ref() == Some(&cur.path) {
+        // A station or an episode isn't a song to build a radio from.
+        if crate::stream::is_url(&cur.path) || i + 1 < self.queue.len() || self.radio_seed.as_ref() == Some(&cur.path) {
             return;
         }
         let seed = cur.clone();
@@ -2895,7 +3012,13 @@ impl App {
     /// The thumbnail key and image source for one Browser row.
     pub fn br_item_thumb(item: &deezer::Item) -> (AlbumRef, ThumbSrc) {
         match item {
+            // Stations and episodes: their logo or artwork.
+            deezer::Item::Track(t) if crate::stream::is_url(&t.path) => {
+                let u = crate::stream::art(&t.path).unwrap_or_default();
+                (Self::url_thumb_key(&u), ThumbSrc::Url(u))
+            }
             deezer::Item::Track(t) => (Self::sp_track_thumb_key(t), ThumbSrc::Track(t.path.clone())),
+            deezer::Item::Show(s) => (Self::url_thumb_key(&s.art), ThumbSrc::Url(s.art.clone())),
             deezer::Item::Album { cover: u, .. }
             | deezer::Item::Artist { picture: u, .. }
             | deezer::Item::Playlist { cover: u, .. } => (Self::url_thumb_key(u), ThumbSrc::Url(u.clone())),
@@ -2926,7 +3049,7 @@ impl App {
                 }
                 (key, srcs)
             }
-            Tab::Browser => {
+            Tab::Browser | Tab::Radio | Tab::Podcasts => {
                 let Some(view) = self.br_current() else { return };
                 let key = format!("br\u{0}{}\u{0}{}", view.title, view.items.len());
                 if key == self.cover_job {
@@ -3985,8 +4108,12 @@ impl App {
         // Explore's home sections take a while to build; start at launch so
         // they're ready by the time the tab is opened.
         if self.config.browser.enabled {
+            self.in_mode(Tab::Browser, |app| app.ensure_browser_home());
+        }
+        if matches!(self.tab, Tab::Radio | Tab::Podcasts) {
             self.ensure_browser_home();
         }
+        self.tick_streams();
         let mut row_thumbs_dirty = false;
         if self.tab == Tab::Local {
             self.request_visible_row_thumbs();
@@ -3997,7 +4124,7 @@ impl App {
             row_thumbs_dirty = self.poll_row_thumb();
         } else if self.tab == Tab::Settings {
             self.refresh_cache_stats();
-        } else if self.tab == Tab::Browser {
+        } else if self.tab.browse() {
             self.br_maybe_search();
             self.prefetch_open_list_covers();
             self.request_visible_br_thumbs();
@@ -4013,6 +4140,7 @@ impl App {
                 if spotify::needs_fetch(&track.path) {
                     self.request_fetch(&track, false);
                 } else if (track.length_secs as f32) > self.audio.crossfade_secs()
+                    && { self.note_progress(); true }
                     && self.audio.crossfade_to(&track.path, track.length_secs)
                 {
                     self.now = Some(i);
@@ -4021,6 +4149,7 @@ impl App {
                     self.set_now_playing(&track);
                     self.request_art(track.path.clone());
                     self.prefetch_next();
+                    self.on_track_started(&track);
                 }
             }
 
@@ -4031,6 +4160,7 @@ impl App {
 
         // While a fetch is pending, `poll_fetch` starts the next track.
         if self.audio.finished() && self.pending_play.is_none() {
+            self.note_progress();
             self.next_track(false);
         }
 
@@ -4104,6 +4234,9 @@ fn art_thumb_path(cover: &[u8]) -> PathBuf {
 /// downscaled once and stored as a JPEG thumbnail shared by every track that
 /// embeds the same image.
 fn load_cover_cached(path: &std::path::Path) -> Option<DynamicImage> {
+    if crate::stream::is_url(path) {
+        return spotify::url_image(&crate::stream::art(path)?);
+    }
     if spotify::is_remote(path) {
         return spotify::load_cover(path);
     }
@@ -4339,4 +4472,10 @@ mod tests {
         assert_eq!((back.now, back.position_secs, back.artist), (Some(1), 83.5, Some(4)));
         assert_eq!(back.repeat, "All");
     }
+}
+
+/// A playback speed for display: "1×", "1.25×".
+pub fn fmt_speed(s: f32) -> String {
+    let t = format!("{s:.2}");
+    format!("{}×", t.trim_end_matches('0').trim_end_matches('.'))
 }

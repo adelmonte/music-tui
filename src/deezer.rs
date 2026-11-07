@@ -20,6 +20,8 @@ pub enum Item {
     Album { id: u64, title: String, artist: String, cover: String },
     Artist { id: u64, name: String, picture: String },
     Playlist { id: u64, title: String, count: u64, cover: String },
+    /// A podcast; opening it lists its episodes.
+    Show(crate::podcast::Show),
 }
 
 /// A titled list of items: a left-pane section, or an opened album/artist/

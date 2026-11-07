@@ -31,8 +31,8 @@ impl App {
             A::ShowKeys => self.show_keys = !self.show_keys,
             A::Help => self.show_help = true,
             A::Art => self.open_art_popup(),
-            A::Tab1 | A::Tab2 | A::Tab3 | A::Tab4 | A::Tab5 => {
-                let n = [A::Tab1, A::Tab2, A::Tab3, A::Tab4, A::Tab5].iter().position(|a| *a == action).unwrap_or(0);
+            A::Tab1 | A::Tab2 | A::Tab3 | A::Tab4 | A::Tab5 | A::Tab6 | A::Tab7 => {
+                let n = [A::Tab1, A::Tab2, A::Tab3, A::Tab4, A::Tab5, A::Tab6, A::Tab7].iter().position(|a| *a == action).unwrap_or(0);
                 return self.goto_tab(n + 1);
             }
             A::Menu => {
@@ -41,9 +41,9 @@ impl App {
             }
             A::FocusNext => self.cycle_focus(true),
             A::FocusPrev => self.cycle_focus(false),
-            A::Search if matches!(tab, Tab::Local | Tab::Streaming | Tab::Browser) => self.set_focus(Focus::Search),
+            A::Search if tab != Tab::Playlists && tab != Tab::Settings => self.set_focus(Focus::Search),
             A::Back => match tab {
-                Tab::Browser => {
+                Tab::Browser | Tab::Radio | Tab::Podcasts => {
                     if !self.br_back() {
                         self.clear_search();
                     }
@@ -66,7 +66,7 @@ impl App {
                     Tab::Local if action == A::Down => self.on_down(),
                     Tab::Local => self.move_selection(delta),
                     Tab::Streaming => self.sp_move(delta),
-                    Tab::Browser => self.br_move(delta),
+                    Tab::Browser | Tab::Radio | Tab::Podcasts => self.br_move(delta),
                     Tab::Playlists => self.pl_move(delta),
                     Tab::Settings => self.settings_move(delta),
                 }
@@ -78,16 +78,16 @@ impl App {
                     Tab::Local if right => self.on_right(),
                     Tab::Local => self.on_left(),
                     Tab::Streaming => self.sp_set_pane(pane),
-                    Tab::Browser => self.br_set_pane(pane),
+                    Tab::Browser | Tab::Radio | Tab::Podcasts => self.br_set_pane(pane),
                     Tab::Playlists => self.pl_set_pane(pane),
                     Tab::Settings => self.settings_adjust(if right { 1 } else { -1 }),
                 }
             }
             A::Activate => match tab {
                 Tab::Local => self.activate(),
-                Tab::Streaming | Tab::Browser if queue => self.queue_play_selected(),
+                Tab::Streaming | Tab::Browser | Tab::Radio | Tab::Podcasts if queue => self.queue_play_selected(),
                 Tab::Streaming => self.sp_activate(),
-                Tab::Browser => self.br_activate(),
+                Tab::Browser | Tab::Radio | Tab::Podcasts => self.br_activate(),
                 Tab::Playlists => self.pl_activate(),
                 Tab::Settings => self.settings_activate(),
             },
@@ -95,7 +95,7 @@ impl App {
                 let wider = action == A::Wider;
                 match tab {
                     Tab::Local => self.resize_focused(wider),
-                    Tab::Streaming | Tab::Browser => self.sp_resize(wider),
+                    Tab::Streaming | Tab::Browser | Tab::Radio | Tab::Podcasts => self.sp_resize(wider),
                     _ => return false,
                 }
             }
@@ -107,8 +107,10 @@ impl App {
             A::Repeat => self.cycle_repeat(),
             A::VolumeUp => self.volume_up(),
             A::VolumeDown => self.volume_down(),
-            A::SeekBack => self.seek_relative(-5),
-            A::SeekForward => self.seek_relative(5),
+            A::SeekBack => self.seek_relative(self.seek_step(false)),
+            A::SeekForward => self.seek_relative(self.seek_step(true)),
+            A::SpeedUp => self.adjust_speed(0.25),
+            A::SpeedDown => self.adjust_speed(-0.25),
             A::KeepGoing => self.toggle_keep_going(),
 
             A::NewPlaylist if tab == Tab::Playlists => self.begin_new_playlist(),
@@ -117,11 +119,11 @@ impl App {
             A::Queue => match tab {
                 Tab::Local if !queue => self.add_to_queue(),
                 Tab::Streaming if !queue => self.sp_add_to_queue(),
-                Tab::Browser if !queue => self.br_add_to_queue(),
+                Tab::Browser | Tab::Radio | Tab::Podcasts if !queue => self.br_add_to_queue(),
                 _ => return false,
             },
-            A::PlayNext if matches!(tab, Tab::Local | Tab::Streaming | Tab::Browser) => self.play_next(),
-            A::Like if matches!(tab, Tab::Local | Tab::Streaming | Tab::Browser) => self.like_current(),
+            A::PlayNext if !matches!(tab, Tab::Playlists | Tab::Settings) => self.play_next(),
+            A::Like if !matches!(tab, Tab::Playlists | Tab::Settings) => self.like_current(),
             A::AddTo if matches!(tab, Tab::Local | Tab::Streaming | Tab::Browser) => self.open_add_menu(),
             A::GoTo if tab != Tab::Settings => self.open_goto_menu(),
             A::Radio if tab != Tab::Settings => match self.radio_target() {
@@ -171,7 +173,7 @@ impl App {
         match self.tab {
             Tab::Local => self.add_to_queue(),
             Tab::Streaming => self.sp_add_to_queue(),
-            Tab::Browser => self.br_add_to_queue(),
+            Tab::Browser | Tab::Radio | Tab::Podcasts => self.br_add_to_queue(),
             _ => return,
         }
         let added = self.queue.len() - before;
@@ -228,6 +230,9 @@ impl App {
                 self.goto_choose(Some(key));
             }
             MenuCmd::Sort(s) => self.sp_set_sort(s),
+            MenuCmd::FindSong(song) => self.find_in_explore(song),
+            MenuCmd::OpenShow(show) => self.pod_open(show),
+            MenuCmd::Subscribe(show) => self.toggle_subscription(show),
         }
     }
 
@@ -255,8 +260,8 @@ impl App {
             },
             Tab::Streaming if self.sp_focus == PlPane::List => (r.sp_list, &self.sp_list_state, row_h),
             Tab::Streaming => (r.sp_tracks, &self.sp_track_state, row_h),
-            Tab::Browser if self.br_focus == PlPane::List => (r.br_sections, &self.br_sec_state, 1),
-            Tab::Browser => (r.br_items, &self.br_item_state, row_h),
+            Tab::Browser | Tab::Radio | Tab::Podcasts if self.br_focus == PlPane::List => (r.br_sections, &self.br_sec_state, 1),
+            Tab::Browser | Tab::Radio | Tab::Podcasts => (r.br_items, &self.br_item_state, row_h),
             Tab::Playlists if self.pl_focus == PlPane::List => (r.pl_list, &self.playlist_state, 1),
             _ => (r.pl_tracks, &self.pl_track_state, 1),
         };
@@ -306,13 +311,22 @@ impl App {
                 act("Remove from queue", Action::Remove),
                 MenuItem::sep(),
             ];
-            if streaming && self.tab != Tab::Local {
-                let liked = self.liked.contains(&t.path);
-                v.push(act(if liked { "Unlike" } else { "Like" }, Action::Like));
-                v.push(self.add_to_submenu());
+            if crate::stream::is_url(&t.path) {
+                if let Some(song) = self.live_song_of(&t) {
+                    v.push(MenuItem::new(format!("Find “{song}” in Explore"), String::new(), MenuCmd::FindSong(song)));
+                }
+                if streams::is_episode(&t) {
+                    v.push(MenuItem::new(if self.episode_played(&t) { "Mark unplayed" } else { "Mark played" }, String::new(), MenuCmd::Act(Action::Like)));
+                }
+            } else {
+                if streaming && self.tab != Tab::Local {
+                    let liked = self.liked.contains(&t.path);
+                    v.push(act(if liked { "Unlike" } else { "Like" }, Action::Like));
+                    v.push(self.add_to_submenu());
+                }
+                v.push(goto("Song radio", GotoKind::Radio, k(Action::Radio)));
+                v.push(goto("Go to artist", GotoKind::Artist, String::new()));
             }
-            v.push(goto("Song radio", GotoKind::Radio, k(Action::Radio)));
-            v.push(goto("Go to artist", GotoKind::Artist, String::new()));
             v.push(MenuItem::sep());
             v.push(act("Clear queue", Action::ClearQueue));
             v.push(act("Hide queue", Action::ToggleQueue));
@@ -427,6 +441,7 @@ impl App {
                 ];
                 (t.map(song_title), v)
             }
+            Tab::Radio | Tab::Podcasts => self.stream_menu_items(),
             Tab::Settings => (None, Vec::new()),
         }
     }

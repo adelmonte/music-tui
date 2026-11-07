@@ -20,6 +20,10 @@ pub enum MenuCmd {
     AddTo(AddTarget),
     Goto(GotoKind),
     Sort(SpSort),
+    /// Look a station's live song up in Explore.
+    FindSong(String),
+    OpenShow(crate::podcast::Show),
+    Subscribe(crate::podcast::Show),
 }
 
 #[derive(Clone, Debug)]

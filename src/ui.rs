@@ -34,7 +34,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match app.tab {
         Tab::Local => draw_body(f, app, chunks[2]),
         Tab::Streaming => draw_spotify(f, app, chunks[2]),
-        Tab::Browser => draw_browser(f, app, chunks[2]),
+        Tab::Browser | Tab::Radio | Tab::Podcasts => draw_browser(f, app, chunks[2]),
         Tab::Playlists => draw_playlists(f, app, chunks[2]),
         Tab::Settings => draw_library(f, app, chunks[2]),
     }
@@ -145,7 +145,7 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     // Each tab is its own span, so clicks map to where it's drawn. With the
     // shortcuts showing, each carries its key.
     let tabs = app.tabs();
-    let keys = [Action::Tab1, Action::Tab2, Action::Tab3, Action::Tab4, Action::Tab5];
+    let keys = [Action::Tab1, Action::Tab2, Action::Tab3, Action::Tab4, Action::Tab5, Action::Tab6, Action::Tab7];
     let mut rects = Vec::with_capacity(tabs.len());
     let mut x = area.x + 1;
     for (i, &tab) in tabs.iter().enumerate() {
@@ -223,11 +223,25 @@ fn hints(app: &App) -> Vec<(Action, &'static str)> {
                 }
                 v
             }
+            Tab::Radio if app.br_focus == PlPane::List => vec![(A::Queue, "Queue all"), (A::Search, "Search stations")],
+            Tab::Radio => vec![(A::Like, "Favorite"), (A::Queue, "Queue"), (A::Search, "Search")],
+            Tab::Podcasts if app.br_focus == PlPane::List => vec![(A::Queue, "Queue all"), (A::Search, "Search podcasts")],
+            Tab::Podcasts => {
+                let show = app.br_current().and_then(|v| app.br_item_state.selected().and_then(|i| v.items.get(i)));
+                let mut v = match show {
+                    Some(crate::deezer::Item::Show(_)) => vec![(A::Activate, "Open"), (A::Like, "Subscribe")],
+                    _ => vec![(A::Like, "Played"), (A::Queue, "Queue"), (A::SpeedDown, "Slower"), (A::SpeedUp, "Faster")],
+                };
+                if !app.br_stack.is_empty() {
+                    v.insert(0, (A::Back, "Back"));
+                }
+                v
+            }
             Tab::Playlists => vec![(A::NewPlaylist, "New from queue"), (A::AppendQueue, "Add queue"), (A::Remove, "Delete list"), (A::RemoveSong, "Remove song")],
             Tab::Settings => Vec::new(),
         }
     };
-    if matches!(app.tab, Tab::Local | Tab::Streaming | Tab::Browser) {
+    if matches!(app.tab, Tab::Local | Tab::Streaming) || app.tab.browse() {
         h.push((A::ToggleQueue, if app.config.ui.show_queue { "Hide queue" } else { "Show queue" }));
     }
     if app.show_keys {
@@ -325,6 +339,8 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     // pair; the placeholder says what's searched.
     let hint = match app.tab {
         Tab::Browser => "all music, from Deezer and YouTube Music",
+        Tab::Radio => "stations by name or genre",
+        Tab::Podcasts => "podcasts by name or topic",
         Tab::Streaming => "your Spotify library and playlists",
         _ => "titles, artists and albums",
     };
@@ -632,6 +648,9 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
                 BigIcons => ("Big transport icons", on_off(app.big_icons).into(), true),
                 TabSpotify => ("Spotify tab", on_off(app.config.spotify.enabled).into(), true),
                 TabExplore => ("Explore tab", on_off(app.config.browser.enabled).into(), true),
+                TabRadio => ("Radio tab", on_off(app.config.radio.enabled).into(), true),
+                TabPodcasts => ("Podcasts tab", on_off(app.config.podcasts.enabled).into(), true),
+                PodcastSpeed => ("Playback speed", format!("◂ {} ▸", crate::app::fmt_speed(app.config.podcasts.speed)), true),
                 TabPlaylists => ("Local Playlists tab", on_off(app.config.ui.show_playlists_tab).into(), true),
                 SharedSearch => ("Shared search across tabs", on_off(app.config.ui.shared_search).into(), true),
                 VimKeys => ("Vim keys (h/j/k/l, J/K)", on_off(app.config.ui.vim_keys).into(), true),
@@ -949,7 +968,7 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
         &mut sec_state,
         sections,
         cols[0],
-        " Explore ",
+        &format!(" {} ", app.tab.label()),
         br_list_focused,
         &mut app.rects.br_sections,
         t,
@@ -984,15 +1003,26 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|item| match item {
             Item::Track(tr) => {
+                let played = app.episode_played(tr);
                 let (mark, mark_style) = if playing.as_deref() == Some(tr.path.as_path()) {
                     ("▶ ", Style::default().fg(t.accent))
                 } else if app.fetching.contains(&tr.path) {
                     ("⇣ ", Style::default().fg(t.accent))
+                } else if played {
+                    ("✓ ", Style::default().fg(t.muted))
                 } else {
                     ("  ", Style::default())
                 };
-                let len = if tr.length_secs > 0 { fmt_time(tr.length_secs) } else { "--:--".into() };
-                let heart = app.liked.contains(&tr.path);
+                let len = if crate::app::is_station(tr) {
+                    "LIVE".into()
+                } else if let Some(left) = app.episode_left(tr).filter(|_| !played) {
+                    format!("{} left", fmt_time(left))
+                } else if tr.length_secs > 1 {
+                    fmt_time(tr.length_secs)
+                } else {
+                    "--:--".into()
+                };
+                let heart = app.liked.contains(&tr.path) || app.radio_favs.iter().any(|f| f.path == tr.path);
                 let title_w = text_w.saturating_sub(len.chars().count() + 4);
                 let sub = if tr.album.is_empty() {
                     tr.track_artist.clone()
@@ -1020,6 +1050,17 @@ fn draw_browser(f: &mut Frame, app: &mut App, area: Rect) {
                 vec![Span::raw("≡ "), Span::raw(fit(title, text_w))],
                 format!("Playlist · {count} songs"),
             ),
+            Item::Show(show) => {
+                let subbed = app.pods.subscribed(&show.feed);
+                row(
+                    vec![
+                        Span::raw("◎ "),
+                        Span::raw(fit(&show.title, text_w.saturating_sub(2))),
+                        Span::styled(if subbed { " ✓" } else { "" }, Style::default().fg(t.accent)),
+                    ],
+                    if show.author.is_empty() { "Podcast".into() } else { format!("Podcast · {}", show.author) },
+                )
+            }
         })
         .collect();
     let mut title = String::from(" ");
@@ -1122,7 +1163,14 @@ fn draw_seekbar(f: &mut Frame, app: &mut App, area: Rect) {
         0.0
     };
     let pos = (ratio * dur as f64) as u64;
-    let label = format!("{} / {}", fmt_time(pos), fmt_time(dur));
+    let url = app.audio.current_path().is_some_and(crate::stream::is_url);
+    let label = if url && dur == 0 {
+        format!("live · {}", fmt_time(app.audio.position().as_secs()))
+    } else if url && (app.config.podcasts.speed - 1.0).abs() > 0.01 {
+        format!("{} / {} · {}", fmt_time(pos), fmt_time(dur), crate::app::fmt_speed(app.config.podcasts.speed))
+    } else {
+        format!("{} / {}", fmt_time(pos), fmt_time(dur))
+    };
     let block = titled(" Progress ", app.focus == Focus::Seekbar, t);
     let inner = block.inner(area);
     app.rects.seekbar = inner;
@@ -1353,12 +1401,12 @@ fn draw_help(f: &mut Frame, area: Rect, tab: Tab, t: Theme, km: &crate::keys::Ke
     use crate::keys::ACTIONS;
     let mut sections: Vec<(&str, Vec<(String, &str)>)> = Vec::new();
     for &(_, action, _, group, desc) in ACTIONS {
-        if matches!(action, Action::Tab2 | Action::Tab3 | Action::Tab4 | Action::Tab5) {
+        if matches!(action, Action::Tab2 | Action::Tab3 | Action::Tab4 | Action::Tab5 | Action::Tab6 | Action::Tab7) {
             continue;
         }
         let keys = km.keys(action);
         let (key, desc) = if action == Action::Tab1 {
-            let ends: Vec<String> = [Action::Tab1, Action::Tab5].iter().map(|a| km.label(*a)).collect();
+            let ends: Vec<String> = [Action::Tab1, Action::Tab7].iter().map(|a| km.label(*a)).collect();
             (format!("{} – {}", ends[0], ends[1]), "Switch tab")
         } else {
             // A second key only when both stay short.

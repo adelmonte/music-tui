@@ -1172,7 +1172,7 @@ pub fn organize_fetched(tracks: Vec<Track>) -> Vec<Track> {
     changed
 }
 
-fn url_encode(s: &str) -> String {
+pub fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 3);
     for b in s.bytes() {
         match b {

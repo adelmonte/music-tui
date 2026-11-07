@@ -11,8 +11,11 @@ mod menu;
 mod ipc;
 mod model;
 mod playlist;
+mod podcast;
+mod radio;
 mod scan;
 mod spotify;
+mod stream;
 mod ui;
 
 use std::io::stdout;

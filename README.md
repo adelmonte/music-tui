@@ -36,6 +36,10 @@ Spotify, YouTube, or Deezer account is needed.
   through YouTube, with likes, custom playlists, and live linked playlists
 - **Explore tab** (optional): search, charts, "For you" recommendations, and song radios
   of similar music
+- **Radio tab** (optional): about 50,000 internet radio stations, with the song that's on
+  air and favorites
+- **Podcasts tab** (optional): search, subscriptions, new episodes, resume where you left
+  off, and playback speed
 
 ## Recommended
 
@@ -45,10 +49,11 @@ Spotify, YouTube, or Deezer account is needed.
 
 ## Requirements for streaming
 
-The Spotify and Explore tabs need these on your `PATH`:
+The Spotify, Explore, Radio and Podcasts tabs need these on your `PATH`:
 
-- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp): finds and downloads songs
-- [`ffmpeg`](https://ffmpeg.org/): writes the audio out as it downloads, so songs play right away
+- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp): finds and downloads songs (Spotify and Explore)
+- [`ffmpeg`](https://ffmpeg.org/): writes songs out as they download, and plays radio
+  stations and podcast episodes
 
 On Arch: `sudo pacman -S yt-dlp ffmpeg`. The local library works without them.
 
@@ -95,7 +100,7 @@ a row at the bottom, and each tab's key. `F1` lists every shortcut.
 
 | Key | Action |
 | --- | --- |
-| `1`–`5` | switch tab (Local · Spotify · Explore · Local Playlists · Settings; hidden tabs are skipped) |
+| `1`–`7` | switch tab (Local · Spotify · Explore · Radio · Podcasts · Local Playlists · Settings; hidden tabs are skipped) |
 | `/` | search (each tab keeps its own search); `Esc` clears it |
 | `Tab` / `Shift-Tab` | cycle focus in every tab: search → panes → queue → progress → buttons → volume |
 | `↑↓` `←→` | move / change pane |
@@ -229,6 +234,36 @@ Deezer for proper metadata and covers. It appears right away in Explore's sideba
 the queue starts, a radio built from it adds up to 25 more songs. It's off while shuffle or
 repeat is on.
 
+## Radio
+
+Stations come from [Radio Browser](https://www.radio-browser.info/), a free, community-run
+directory of about 50,000 stations. The tab opens on popular stations, the ones popular in
+your country (from your locale), the most voted, and a few genres. Search finds stations by
+name or by genre (`jazz`, `news`, `lofi`).
+
+`Enter` or double-click plays a station; `l` adds it to (or removes it from) **Favorites**,
+which stay at the top. Most stations send the name of the song on air, which shows as now
+playing; right-click the station to look that song up in Explore.
+
+## Podcasts
+
+Shows come from Apple's podcast directory (search and the top chart, no account needed)
+and are read straight from their RSS feeds. Open a show to see its episodes, newest first.
+
+| Key | Action |
+| --- | --- |
+| `Enter` | open a show · play an episode |
+| `l` | subscribe / unsubscribe (on a show) · mark played / unplayed (on an episode) |
+| `>` / `<` | faster / slower (0.5× to 3×, pitch is kept; also in Settings) |
+| `[` / `]` | back 10 s / ahead 30 s |
+
+**Subscriptions** and **New episodes** (the latest across your subscriptions, refreshed
+every launch) sit at the top of the tab. Every episode remembers where you stopped and
+picks up from there; rows show the time left, and finished episodes are ticked (✓).
+Episodes stream; nothing is downloaded.
+
+Both tabs can be turned off in Settings → Tabs.
+
 ## Remote control
 
 While music-tui is running, you can control it from any other terminal or bind these flags
@@ -291,6 +326,13 @@ links = []                               # linked playlist URLs (added with `u`)
 [browser]
 enabled = true                           # the Explore tab
 
+[radio]
+enabled = true                           # the Radio tab
+
+[podcasts]
+enabled = true                           # the Podcasts tab
+speed = 1.0                              # playback speed for episodes
+
 # Change any shortcut: an action name and its keys. An empty list unbinds it.
 # The names are in src/keys.rs; F1 in the app shows what each key does.
 [keys]
@@ -311,6 +353,8 @@ macOS and Windows use their respective conventions via the
 | `~/.local/share/music-tui/library.db` | SQLite index of the scanned library |
 | `~/.local/share/music-tui/playlists.toml` | saved local playlists |
 | `~/.local/share/music-tui/streaming.toml` | Spotify-tab library: imported lists, likes, your playlists |
+| `~/.local/share/music-tui/radio.toml` | favorite radio stations |
+| `~/.local/share/music-tui/podcasts.toml` | podcast subscriptions, where you stopped in each episode, finished episodes |
 | `~/.local/share/music-tui/spotify_matches.toml` | which YouTube video each song uses, and rejected ones |
 | `~/.local/share/music-tui/session.toml` | queue and position to resume from |
 | `~/.cache/music-tui/covers/` | resized thumbnails of oversized local album art |

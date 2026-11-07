@@ -122,7 +122,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 if app.tab == Tab::Streaming {
                     app.sp_set_pane(PlPane::Tracks);
                 }
-                if app.tab == Tab::Browser {
+                if app.tab.browse() {
                     if key.code == KeyCode::Enter {
                         app.br_search_now();
                     }
@@ -323,10 +323,10 @@ pub fn handle_mouse(app: &mut App, ev: MouseEvent) {
         }
         MouseEventKind::ScrollDown if app.tab == Tab::Settings => app.settings_move(1),
         MouseEventKind::ScrollUp if app.tab == Tab::Settings => app.settings_move(-1),
-        MouseEventKind::ScrollDown if app.tab == Tab::Browser && !hit(app.rects.volume, x, y) => {
+        MouseEventKind::ScrollDown if app.tab.browse() && !hit(app.rects.volume, x, y) => {
             br_scroll(app, x, y, 1)
         }
-        MouseEventKind::ScrollUp if app.tab == Tab::Browser && !hit(app.rects.volume, x, y) => {
+        MouseEventKind::ScrollUp if app.tab.browse() && !hit(app.rects.volume, x, y) => {
             br_scroll(app, x, y, -1)
         }
         MouseEventKind::ScrollDown => {
@@ -603,7 +603,7 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     }
 
     // Browser tab: click a section or row; double-click plays/opens.
-    if app.tab == Tab::Browser {
+    if app.tab.browse() {
         if hit(r.search, x, y) {
             app.set_focus(Focus::Search);
             return;
@@ -881,7 +881,7 @@ fn select_at(app: &mut App, x: u16, y: u16) -> bool {
     let hit_row = |rect: Rect, state: &ListState, len: usize, h: u16| {
         if hit(rect, x, y) && x != scrollbar_col(rect) { row_index(rect, state, y, len, h) } else { None }
     };
-    if r.queue.width > 0 && matches!(app.tab, Tab::Local | Tab::Streaming | Tab::Browser) {
+    if r.queue.width > 0 && matches!(app.tab, Tab::Local | Tab::Streaming) || r.queue.width > 0 && app.tab.browse() {
         if let Some(i) = hit_row(r.queue, &app.queue_state, app.queue.len(), 1) {
             match app.tab {
                 Tab::Local => app.set_focus(Focus::Queue),
@@ -925,7 +925,7 @@ fn select_at(app: &mut App, x: u16, y: u16) -> bool {
                 return false;
             }
         }
-        Tab::Browser => {
+        Tab::Browser | Tab::Radio | Tab::Podcasts => {
             let items = app.br_current().map(|v| v.items.len()).unwrap_or(0);
             if let Some(i) = hit_row(r.br_sections, &app.br_sec_state, app.br_section_count(), 1) {
                 app.br_set_pane(PlPane::List);

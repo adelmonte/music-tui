@@ -30,6 +30,10 @@ pub struct Config {
     /// Browser (music discovery) tab.
     #[serde(default)]
     pub browser: BrowserConfig,
+    #[serde(default)]
+    pub radio: RadioConfig,
+    #[serde(default)]
+    pub podcasts: PodcastConfig,
     /// Shortcut overrides: action name → keys (see `keys::ACTIONS`).
     #[serde(default)]
     pub keys: std::collections::HashMap<String, Vec<String>>,
@@ -45,6 +49,39 @@ pub struct BrowserConfig {
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self { enabled: true }
+    }
+}
+
+/// Radio tab options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RadioConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for RadioConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Podcasts tab options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PodcastConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Playback speed for episodes (pitch is kept).
+    #[serde(default = "default_speed")]
+    pub speed: f32,
+}
+
+fn default_speed() -> f32 {
+    1.0
+}
+
+impl Default for PodcastConfig {
+    fn default() -> Self {
+        Self { enabled: true, speed: 1.0 }
     }
 }
 
@@ -261,6 +298,8 @@ impl Default for Config {
             ui: UiConfig::default(),
             spotify: SpotifyConfig::default(),
             browser: BrowserConfig::default(),
+            radio: RadioConfig::default(),
+            podcasts: PodcastConfig::default(),
             keys: Default::default(),
         }
     }
@@ -388,6 +427,21 @@ pub fn streaming_store_path() -> PathBuf {
     project_dirs()
         .map(|d| d.data_dir().join("streaming.toml"))
         .unwrap_or_else(|| PathBuf::from("music-tui-streaming.toml"))
+}
+
+/// Favorite radio stations, e.g. ~/.local/share/music-tui/radio.toml.
+pub fn radio_store_path() -> PathBuf {
+    project_dirs()
+        .map(|d| d.data_dir().join("radio.toml"))
+        .unwrap_or_else(|| PathBuf::from("music-tui-radio.toml"))
+}
+
+/// Podcast subscriptions, episode progress and played marks, e.g.
+/// ~/.local/share/music-tui/podcasts.toml.
+pub fn podcast_store_path() -> PathBuf {
+    project_dirs()
+        .map(|d| d.data_dir().join("podcasts.toml"))
+        .unwrap_or_else(|| PathBuf::from("music-tui-podcasts.toml"))
 }
 
 /// Saved playback/UI state for resuming where the last run left off, e.g.
@@ -585,6 +639,20 @@ impl Config {
             && br.get("enabled").and_then(|i| i.as_bool()) != Some(self.browser.enabled)
         {
             br["enabled"] = toml_edit::value(self.browser.enabled);
+        }
+        if let Some(r) = doc["radio"].or_insert(toml_edit::table()).as_table_mut()
+            && r.get("enabled").and_then(|i| i.as_bool()) != Some(self.radio.enabled)
+        {
+            r["enabled"] = toml_edit::value(self.radio.enabled);
+        }
+        if let Some(p) = doc["podcasts"].or_insert(toml_edit::table()).as_table_mut() {
+            if p.get("enabled").and_then(|i| i.as_bool()) != Some(self.podcasts.enabled) {
+                p["enabled"] = toml_edit::value(self.podcasts.enabled);
+            }
+            let speed = (self.podcasts.speed as f64 * 100.0).round() / 100.0;
+            if p.get("speed").and_then(|i| i.as_float()) != Some(speed) {
+                p["speed"] = toml_edit::value(speed);
+            }
         }
 
         doc.to_string()

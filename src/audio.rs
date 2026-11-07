@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -30,6 +31,10 @@ pub struct Audio {
     current: Option<PathBuf>,
     duration: Duration,
     started: bool,
+    /// The current track's stream state, when it plays from a URL.
+    stream: Option<Arc<crate::stream::Shared>>,
+    /// Speed for podcast episodes.
+    speed: f32,
 }
 
 impl Audio {
@@ -49,6 +54,8 @@ impl Audio {
             current: None,
             duration: Duration::ZERO,
             started: false,
+            stream: None,
+            speed: 1.0,
         })
     }
 
@@ -64,7 +71,22 @@ impl Audio {
         self.crossfade_secs = secs.max(0.0);
     }
 
-    fn decode(path: &Path) -> Result<Box<dyn Source + Send>> {
+    fn decode(&self, path: &Path, length_secs: u64) -> Result<(Box<dyn Source + Send>, Option<Arc<crate::stream::Shared>>)> {
+        if crate::stream::is_url(path) {
+            let shared = Arc::new(crate::stream::Shared::default());
+            // Only episodes (which have a length) are sped up.
+            if length_secs > 0 {
+                shared.set_speed(self.speed);
+            }
+            let url = path.to_string_lossy();
+            let src = crate::stream::UrlSource::open(&url, length_secs > 0, shared.clone())
+                .with_context(|| format!("starting ffmpeg for {url} (is ffmpeg installed?)"))?;
+            return Ok((Box::new(src), Some(shared)));
+        }
+        Ok((Self::decode_file(path)?, None))
+    }
+
+    fn decode_file(path: &Path) -> Result<Box<dyn Source + Send>> {
         if crate::opus::is_ogg(path)
             && let Ok(src) = crate::opus::OpusSource::open(path)
         {
@@ -91,7 +113,8 @@ impl Audio {
 
     /// Hard-start a track, cancelling any crossfade.
     pub fn play(&mut self, path: &Path, length_secs: u64) -> Result<()> {
-        let decoder = Self::decode(path)?;
+        let (decoder, stream) = self.decode(path, length_secs)?;
+        self.stream = stream;
         // Dropping a Player stops whatever it was playing.
         self.outgoing.clear();
         self.cur = Player::connect_new(self.handle.mixer());
@@ -106,9 +129,10 @@ impl Audio {
     /// Begin crossfading into `path` on a fresh player. Returns false if the
     /// track can't be decoded (caller should not commit the track change).
     pub fn crossfade_to(&mut self, path: &Path, length_secs: u64) -> bool {
-        let Ok(decoder) = Self::decode(path) else {
+        let Ok((decoder, stream)) = self.decode(path, length_secs) else {
             return false;
         };
+        self.stream = stream;
         let incoming = self.new_player(0.0);
         incoming.append(decoder);
         let prev = std::mem::replace(&mut self.cur, incoming);
@@ -129,7 +153,7 @@ impl Audio {
         if self.crossfade_secs <= 0.0 || self.fading() || self.current.is_none() {
             return false;
         }
-        let dur = self.duration.as_secs_f32();
+        let dur = self.duration().as_secs_f32();
         if dur <= self.crossfade_secs + 0.5 {
             return false; // too short to fade meaningfully
         }
@@ -182,10 +206,34 @@ impl Audio {
     }
 
     pub fn position(&self) -> Duration {
-        self.cur.get_pos()
+        match &self.stream {
+            Some(s) => s.position(),
+            None => self.cur.get_pos(),
+        }
+    }
+
+    /// A live stream's current song, as the station names it.
+    pub fn stream_title(&self) -> Option<String> {
+        self.stream.as_ref().and_then(|s| s.title.lock().ok()?.clone())
+    }
+
+    /// Podcast speed; applies to the playing episode at once.
+    pub fn set_speed(&mut self, speed: f32) {
+        self.speed = speed.clamp(0.5, 3.0);
+        if let Some(s) = &self.stream
+            && !self.duration.is_zero()
+        {
+            s.set_speed(self.speed);
+        }
     }
 
     pub fn duration(&self) -> Duration {
+        // An episode whose feed gave no length: ffmpeg's, once it knows.
+        if self.duration <= Duration::from_secs(1)
+            && let Some(d) = self.stream.as_ref().and_then(|s| s.duration())
+        {
+            return d;
+        }
         self.duration
     }
 
@@ -214,7 +262,7 @@ impl Audio {
         if self.current.is_none() {
             return false;
         }
-        let target = pos.min(self.duration);
+        let target = pos.min(self.duration());
         self.cur.try_seek(target).is_ok()
     }
 
@@ -225,10 +273,10 @@ impl Audio {
     }
 
     pub fn seek_fraction(&mut self, frac: f64) -> bool {
-        if self.duration.is_zero() {
+        if self.duration().is_zero() {
             return false;
         }
-        let secs = self.duration.as_secs_f64() * frac.clamp(0.0, 1.0);
+        let secs = self.duration().as_secs_f64() * frac.clamp(0.0, 1.0);
         self.seek_to(Duration::from_secs_f64(secs))
     }
 
@@ -238,5 +286,6 @@ impl Audio {
         self.current = None;
         self.started = false;
         self.duration = Duration::ZERO;
+        self.stream = None;
     }
 }
