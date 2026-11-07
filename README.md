@@ -1,6 +1,7 @@
 # music-tui
 
-> On Android: **[music-android](https://github.com/adelmonte/music-android)**, the phone companion, with your playlists, radio and podcasts.
+> Companions: **[music-android](https://github.com/adelmonte/music-android)** on the phone and
+> **[music-kodi](https://github.com/adelmonte/music-kodi)** in Kodi, with your playlists, radio and podcasts.
 
 <p align="center">
   <img src="screenshots/tour.webp" alt="music-tui: Spotify, Explore and Local tabs" width="900">
