@@ -30,6 +30,9 @@ pub struct Config {
     /// Browser (music discovery) tab.
     #[serde(default)]
     pub browser: BrowserConfig,
+    /// Shortcut overrides: action name → keys (see `keys::ACTIONS`).
+    #[serde(default)]
+    pub keys: std::collections::HashMap<String, Vec<String>>,
 }
 
 /// Browser tab options.
@@ -102,6 +105,12 @@ pub struct UiConfig {
     /// Show the queue under the songs (Local, Spotify and Explore tabs).
     #[serde(default = "default_true")]
     pub show_queue: bool,
+    /// Vim movement keys (h/j/k/l, J/K) on top of the arrow keys.
+    #[serde(default)]
+    pub vim_keys: bool,
+    /// Keep the row of shortcut hints above the player visible.
+    #[serde(default)]
+    pub show_hints: bool,
 }
 
 fn default_true() -> bool {
@@ -118,6 +127,8 @@ impl Default for UiConfig {
             show_playlists_tab: default_true(),
             shared_search: false,
             show_queue: true,
+            vim_keys: false,
+            show_hints: false,
         }
     }
 }
@@ -250,6 +261,7 @@ impl Default for Config {
             ui: UiConfig::default(),
             spotify: SpotifyConfig::default(),
             browser: BrowserConfig::default(),
+            keys: Default::default(),
         }
     }
 }
@@ -522,6 +534,12 @@ impl Config {
             }
             if ui.get("show_queue").and_then(|i| i.as_bool()) != Some(self.ui.show_queue) {
                 ui["show_queue"] = toml_edit::value(self.ui.show_queue);
+            }
+            if ui.get("vim_keys").and_then(|i| i.as_bool()) != Some(self.ui.vim_keys) {
+                ui["vim_keys"] = toml_edit::value(self.ui.vim_keys);
+            }
+            if ui.get("show_hints").and_then(|i| i.as_bool()) != Some(self.ui.show_hints) {
+                ui["show_hints"] = toml_edit::value(self.ui.show_hints);
             }
             if ui.get("shared_search").and_then(|i| i.as_bool()) != Some(self.ui.shared_search) {
                 ui["shared_search"] = toml_edit::value(self.ui.shared_search);

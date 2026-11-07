@@ -5,6 +5,8 @@ use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 
 use crate::app::{App, Drag, Focus, PathField, PlPane, ScrollList, Tab};
+use crate::keys::Action;
+use crate::menu::Outcome;
 
 /// Translate a key press into app state changes. Modal: help overlay, search
 /// field, and library-path editing each capture input first.
@@ -166,257 +168,74 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Album-art popup: available from any tab, but not while typing (handled above).
-    if key.code == KeyCode::Char('i') {
-        app.open_art_popup();
+    // The right-click menu takes the arrows, Enter and Esc; any other key
+    // closes it and does what it normally does.
+    if let Some(menu) = &mut app.menu {
+        let km = &app.keymap;
+        let outcome = if km.is(&key, Action::Up) {
+            menu.step(-1);
+            Outcome::Stay
+        } else if km.is(&key, Action::Down) {
+            menu.step(1);
+            Outcome::Stay
+        } else if km.is(&key, Action::Activate) || km.is(&key, Action::Right) {
+            menu.choose()
+        } else if km.is(&key, Action::Left) || key.code == KeyCode::Esc {
+            menu.back()
+        } else if km.is(&key, Action::Menu) {
+            Outcome::Close
+        } else {
+            app.menu = None;
+            return handle_key(app, key);
+        };
+        return run_outcome(app, outcome);
+    }
+
+    if app.show_keys && key.code == KeyCode::Esc {
+        app.show_keys = false;
         return;
     }
 
-    // Number keys pick a tab by its position in the (variable-length) tab bar.
-    if let KeyCode::Char(c) = key.code
-        && let Some(n) = c.to_digit(10)
-        && app.goto_tab(n as usize)
-    {
-        return;
-    }
-
-    // Outside Local, the bars at the bottom (progress, playback buttons,
-    // volume) take the arrow keys and Enter the same way they do there;
-    // everything else falls through to the tab's keymap.
-    if app.tab != Tab::Local && !app.panes_focused() && app.focus != Focus::Search {
-        match key.code {
-            KeyCode::Left | KeyCode::Char('h') => return app.on_left(),
-            KeyCode::Right | KeyCode::Char('l') => return app.on_right(),
-            KeyCode::Up | KeyCode::Char('k') if app.focus == Focus::Volume => return app.volume_up(),
-            KeyCode::Down | KeyCode::Char('j') if app.focus == Focus::Volume => return app.volume_down(),
-            KeyCode::Up | KeyCode::Down | KeyCode::Char('k') | KeyCode::Char('j') => return,
-            KeyCode::Enter => return app.activate(),
-            KeyCode::Tab => return app.cycle_focus(true),
-            KeyCode::BackTab => return app.cycle_focus(false),
-            KeyCode::Esc => return app.set_focus(Focus::Tracks),
-            _ => {}
+    // Settings rows also answer to their own letters.
+    if app.tab == Tab::Settings && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+        let done = match key.code {
+            KeyCode::Char(' ') => Some(app.settings_activate()),
+            KeyCode::Char('e') => Some(app.begin_edit_path(PathField::MusicDir)),
+            KeyCode::Char('p') => Some(app.begin_edit_path(PathField::SpotifyCsv)),
+            KeyCode::Char('s') => Some(app.toggle_spotify()),
+            KeyCode::Char('b') => Some(app.toggle_browser()),
+            KeyCode::Char('r') => Some(app.start_scan()),
+            KeyCode::Char('c') => Some(app.toggle_cache_all_art()),
+            KeyCode::Char('t') => Some(app.toggle_sort_articles()),
+            KeyCode::Char('v') => Some(app.toggle_album_thumbnails()),
+            KeyCode::Char('+') | KeyCode::Char('=') => Some(app.adjust_gapless(0.5)),
+            KeyCode::Char('-') | KeyCode::Char('_') => Some(app.adjust_gapless(-0.5)),
+            _ => None,
+        };
+        if done.is_some() {
+            return;
         }
     }
 
-    // The queue pane under the Spotify/Explore songs: same keys as in Local.
-    if matches!(app.tab, Tab::Streaming | Tab::Browser) && app.queue_focused() && app.panes_focused() {
-        match key.code {
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => return app.move_queue_item(-1),
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => return app.move_queue_item(1),
-            KeyCode::Char('K') => return app.move_queue_item(-1),
-            KeyCode::Char('J') => return app.move_queue_item(1),
-            KeyCode::Up | KeyCode::Char('k') => return app.queue_move(-1),
-            KeyCode::Down | KeyCode::Char('j') => return app.queue_move(1),
-            KeyCode::PageUp => return app.queue_move(-10),
-            KeyCode::PageDown => return app.queue_move(10),
-            KeyCode::Enter => return app.queue_play_selected(),
-            KeyCode::Char('d') | KeyCode::Delete => return app.remove_from_queue(),
-            KeyCode::Char('c') => return app.clear_queue(),
-            _ => {}
+    // Everything else goes through the keymap; where a key has more than
+    // one action, the first that applies here runs.
+    let actions = app.keymap.actions(&key).to_vec();
+    for action in actions {
+        if app.run_action(action) {
+            return;
         }
     }
+}
 
-    // `Q` shows/hides the queue in any tab.
-    if key.code == KeyCode::Char('Q') && app.tab != Tab::Settings {
-        return app.toggle_queue();
-    }
-
-    // Settings tab has its own small keymap.
-    if app.tab == Tab::Settings {
-        match key.code {
-            KeyCode::Char('q') => app.should_quit = true,
-            KeyCode::Char('?') => app.show_help = true,
-            KeyCode::Up | KeyCode::Char('k') => app.settings_move(-1),
-            KeyCode::Down | KeyCode::Char('j') => app.settings_move(1),
-            KeyCode::PageUp => app.settings_move(-10),
-            KeyCode::PageDown => app.settings_move(10),
-            KeyCode::Enter | KeyCode::Char(' ') => app.settings_activate(),
-            KeyCode::Tab => app.cycle_focus(true),
-            KeyCode::BackTab => app.cycle_focus(false),
-            KeyCode::Left | KeyCode::Char('h') => app.settings_adjust(-1),
-            KeyCode::Right | KeyCode::Char('l') => app.settings_adjust(1),
-            KeyCode::Char('e') => app.begin_edit_path(PathField::MusicDir),
-            KeyCode::Char('p') => app.begin_edit_path(PathField::SpotifyCsv),
-            KeyCode::Char('s') => app.toggle_spotify(),
-            KeyCode::Char('b') => app.toggle_browser(),
-            KeyCode::Char('r') => app.start_scan(),
-            KeyCode::Char('c') => app.toggle_cache_all_art(),
-            KeyCode::Char('t') => app.toggle_sort_articles(),
-            KeyCode::Char('v') => app.toggle_album_thumbnails(),
-            KeyCode::Char('+') | KeyCode::Char('=') => app.adjust_gapless(0.5),
-            KeyCode::Char('-') | KeyCode::Char('_') => app.adjust_gapless(-0.5),
-            _ => {}
+/// Act on what the right-click menu returned.
+fn run_outcome(app: &mut App, outcome: Outcome) {
+    match outcome {
+        Outcome::Stay => {}
+        Outcome::Close => app.menu = None,
+        Outcome::Run(cmd) => {
+            app.menu = None;
+            app.run_menu_cmd(cmd);
         }
-        return;
-    }
-
-    // Spotify tab keymap.
-    if app.tab == Tab::Streaming {
-        match key.code {
-            KeyCode::Char('q') => app.should_quit = true,
-            KeyCode::Char('?') => app.show_help = true,
-            KeyCode::Up | KeyCode::Char('k') => app.sp_move(-1),
-            KeyCode::Down | KeyCode::Char('j') => app.sp_move(1),
-            KeyCode::PageUp => app.sp_move(-10),
-            KeyCode::PageDown => app.sp_move(10),
-            KeyCode::Left | KeyCode::Char('h') => app.sp_set_pane(PlPane::List),
-            KeyCode::Right | KeyCode::Char('l') => app.sp_set_pane(PlPane::Tracks),
-            KeyCode::Tab => app.cycle_focus(true),
-            KeyCode::BackTab => app.cycle_focus(false),
-            KeyCode::Enter => app.sp_activate(),
-            KeyCode::Char('a') => app.sp_add_to_queue(),
-            KeyCode::Char('R') => app.reimport_spotify(),
-            KeyCode::Char('f') => app.like_current(),
-            KeyCode::Char('m') => app.open_add_menu(),
-            KeyCode::Char('d') | KeyCode::Delete => app.sp_delete(),
-            KeyCode::Char('u') => app.begin_link_input(),
-            KeyCode::Char('o') => app.sp_cycle_sort(),
-            KeyCode::Char('x') => app.sp_reject(),
-            KeyCode::Char('/') => app.set_focus(Focus::Search),
-            KeyCode::Esc => app.clear_search(),
-            KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::ALT) => app.sp_resize(true),
-            KeyCode::Char('[') if key.modifiers.contains(KeyModifiers::ALT) => app.sp_resize(false),
-            KeyCode::Char(' ') => app.toggle_pause(),
-            KeyCode::Char('n') => app.next_track(true),
-            KeyCode::Char('p') => app.prev_track(),
-            KeyCode::Char('s') => app.toggle_shuffle(),
-            KeyCode::Char('r') => app.cycle_repeat(),
-            KeyCode::Char('g') => app.open_goto_menu(),
-            KeyCode::Char('G') => app.toggle_keep_going(),
-            KeyCode::Char('+') | KeyCode::Char('=') => app.volume_up(),
-            KeyCode::Char('-') | KeyCode::Char('_') => app.volume_down(),
-            KeyCode::Char('[') => app.seek_relative(-5),
-            KeyCode::Char(']') => app.seek_relative(5),
-            _ => {}
-        }
-        return;
-    }
-
-    // Browser tab keymap.
-    if app.tab == Tab::Browser {
-        match key.code {
-            KeyCode::Char('q') => app.should_quit = true,
-            KeyCode::Char('?') => app.show_help = true,
-            KeyCode::Up | KeyCode::Char('k') => app.br_move(-1),
-            KeyCode::Down | KeyCode::Char('j') => app.br_move(1),
-            KeyCode::PageUp => app.br_move(-10),
-            KeyCode::PageDown => app.br_move(10),
-            KeyCode::Left | KeyCode::Char('h') => app.br_set_pane(PlPane::List),
-            KeyCode::Right | KeyCode::Char('l') => app.br_set_pane(PlPane::Tracks),
-            KeyCode::Tab => app.cycle_focus(true),
-            KeyCode::BackTab => app.cycle_focus(false),
-            KeyCode::Enter => app.br_activate(),
-            KeyCode::Backspace => {
-                app.br_back();
-            }
-            KeyCode::Esc => {
-                if !app.br_back() {
-                    app.clear_search();
-                }
-            }
-            KeyCode::Char('/') => app.set_focus(Focus::Search),
-            KeyCode::Char('a') => app.br_add_to_queue(),
-            KeyCode::Char('f') => app.like_current(),
-            KeyCode::Char('m') => app.open_add_menu(),
-            KeyCode::Char('x') => app.br_reject(),
-            KeyCode::Char('S') => app.br_save_view(),
-            KeyCode::Char(' ') => app.toggle_pause(),
-            KeyCode::Char('n') => app.next_track(true),
-            KeyCode::Char('p') => app.prev_track(),
-            KeyCode::Char('s') => app.toggle_shuffle(),
-            KeyCode::Char('r') => app.cycle_repeat(),
-            KeyCode::Char('g') => app.open_goto_menu(),
-            KeyCode::Char('G') => app.toggle_keep_going(),
-            KeyCode::Char('+') | KeyCode::Char('=') => app.volume_up(),
-            KeyCode::Char('-') | KeyCode::Char('_') => app.volume_down(),
-            KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::ALT) => app.sp_resize(true),
-            KeyCode::Char('[') if key.modifiers.contains(KeyModifiers::ALT) => app.sp_resize(false),
-            KeyCode::Char('[') => app.seek_relative(-5),
-            KeyCode::Char(']') => app.seek_relative(5),
-            _ => {}
-        }
-        return;
-    }
-
-    // Playlists tab keymap.
-    if app.tab == Tab::Playlists {
-        match key.code {
-            KeyCode::Char('q') => app.should_quit = true,
-            KeyCode::Char('?') => app.show_help = true,
-            KeyCode::Up | KeyCode::Char('k') => app.pl_move(-1),
-            KeyCode::Down | KeyCode::Char('j') => app.pl_move(1),
-            KeyCode::Left | KeyCode::Char('h') => app.pl_set_pane(crate::app::PlPane::List),
-            KeyCode::Right | KeyCode::Char('l') => app.pl_set_pane(crate::app::PlPane::Tracks),
-            KeyCode::Tab => app.cycle_focus(true),
-            KeyCode::BackTab => app.cycle_focus(false),
-            KeyCode::Enter => app.pl_activate(),
-            KeyCode::Char('n') => app.begin_new_playlist(),
-            KeyCode::Char('a') => app.append_queue_to_playlist(),
-            KeyCode::Char('d') => app.delete_playlist(),
-            KeyCode::Char('x') => app.remove_pl_track(),
-            KeyCode::Char('g') => app.open_goto_menu(),
-            KeyCode::Char('G') => app.toggle_keep_going(),
-            KeyCode::Char(' ') => app.toggle_pause(),
-            _ => {}
-        }
-        return;
-    }
-
-    // Main view keymap (hybrid arrows + vim).
-    match key.code {
-        KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Char('?') => app.show_help = true,
-        KeyCode::Char('/') => app.set_focus(Focus::Search),
-        KeyCode::Esc => app.clear_search(),
-        KeyCode::Tab => app.cycle_focus(true),
-        KeyCode::BackTab => app.cycle_focus(false),
-
-        KeyCode::Up if app.focus == Focus::Queue && key.modifiers.contains(KeyModifiers::SHIFT) => {
-            app.move_queue_item(-1)
-        }
-        KeyCode::Down if app.focus == Focus::Queue && key.modifiers.contains(KeyModifiers::SHIFT) => {
-            app.move_queue_item(1)
-        }
-        KeyCode::Char('K') if app.focus == Focus::Queue => app.move_queue_item(-1),
-        KeyCode::Char('J') if app.focus == Focus::Queue => app.move_queue_item(1),
-        KeyCode::Char('d') | KeyCode::Delete if app.focus == Focus::Queue => {
-            app.remove_from_queue()
-        }
-        KeyCode::Up | KeyCode::Char('k') => app.on_up(),
-        KeyCode::Down | KeyCode::Char('j') => app.on_down(),
-        KeyCode::PageUp => app.move_selection(-10),
-        KeyCode::PageDown => app.move_selection(10),
-        KeyCode::Left | KeyCode::Char('h') => app.on_left(),
-        KeyCode::Right | KeyCode::Char('l') => app.on_right(),
-        KeyCode::Enter => app.activate(),
-        KeyCode::Char('a') => {
-            if app.focus == Focus::Queue {
-                app.remove_from_queue();
-            } else {
-                app.add_to_queue();
-            }
-        }
-        KeyCode::Char('c') => app.clear_queue(),
-
-        KeyCode::Char(' ') => app.toggle_pause(),
-        KeyCode::Char('n') => app.next_track(true),
-        KeyCode::Char('p') => app.prev_track(),
-        KeyCode::Char('s') => app.toggle_shuffle(),
-        KeyCode::Char('r') => app.cycle_repeat(),
-        KeyCode::Char('g') => app.open_goto_menu(),
-        KeyCode::Char('G') => app.toggle_keep_going(),
-        KeyCode::Char('+') | KeyCode::Char('=') => app.volume_up(),
-        KeyCode::Char('-') | KeyCode::Char('_') => app.volume_down(),
-        // Alt+] / Alt+[ resize the focused column; plain [ ] seek.
-        KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::ALT) => {
-            app.resize_focused(true)
-        }
-        KeyCode::Char('[') if key.modifiers.contains(KeyModifiers::ALT) => {
-            app.resize_focused(false)
-        }
-        KeyCode::Char('[') => app.seek_relative(-5),
-        KeyCode::Char(']') => app.seek_relative(5),
-        _ => {}
     }
 }
 
@@ -464,7 +283,38 @@ fn scroll_offset_at(rect: Rect, y: u16, len: usize, row_h: u16) -> Option<usize>
 /// Translate a mouse event into app state changes using the per-frame rects.
 pub fn handle_mouse(app: &mut App, ev: MouseEvent) {
     let (x, y) = (ev.column, ev.row);
+    if let Some(menu) = &mut app.menu {
+        match ev.kind {
+            MouseEventKind::Moved | MouseEventKind::Drag(_) => menu.hover(x, y),
+            MouseEventKind::Down(MouseButton::Left) => {
+                let outcome = menu.click(x, y);
+                run_outcome(app, outcome);
+            }
+            MouseEventKind::Down(MouseButton::Right) if !menu.contains(x, y) => {
+                // Right-click elsewhere: a new menu there.
+                app.menu = None;
+                return handle_mouse(app, ev);
+            }
+            MouseEventKind::ScrollDown => menu.step(1),
+            MouseEventKind::ScrollUp => menu.step(-1),
+            _ => {}
+        }
+        return;
+    }
     match ev.kind {
+        MouseEventKind::Down(MouseButton::Right) => {
+            close_popups(app);
+            if select_at(app, x, y) {
+                app.open_context_menu((x, y));
+            }
+        }
+        // Middle-click queues what's under the pointer.
+        MouseEventKind::Down(MouseButton::Middle) => {
+            close_popups(app);
+            if select_at(app, x, y) {
+                app.run_action(Action::Queue);
+            }
+        }
         MouseEventKind::ScrollDown if app.tab == Tab::Streaming && !hit(app.rects.volume, x, y) => {
             sp_scroll(app, x, y, 1)
         }
@@ -663,9 +513,9 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
     // A fresh click ends any prior drag grab.
     app.dragging = None;
     let r = app.rects.clone();
-    // Key hints press their key.
-    if let Some(&(_, code)) = r.hints.iter().find(|(rect, _)| hit(*rect, x, y)) {
-        handle_key(app, KeyEvent::new(code, KeyModifiers::NONE));
+    // Key hints run their action.
+    if let Some(&(_, action)) = r.hints.iter().find(|(rect, _)| hit(*rect, x, y)) {
+        app.run_action(action);
         return;
     }
     let double = app.is_double_click(x, y);
@@ -675,9 +525,9 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
         app.set_tab(tab);
         return;
     }
-    // "? help" hint in the top-right.
+    // "? keys" in the top-right.
     if hit(r.help_hint, x, y) {
-        app.show_help = true;
+        app.show_keys = !app.show_keys;
         return;
     }
 
@@ -1007,4 +857,97 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
             app.activate_play();
         }
     }
+}
+
+/// Close the overlays a click would close.
+fn close_popups(app: &mut App) {
+    app.show_help = false;
+    app.show_art_popup = false;
+    app.goto_menu = None;
+    app.confirm = None;
+}
+
+/// Highlight (and focus) the list row under the pointer, as a click would
+/// but without playing or grabbing anything. False if there's no row there.
+fn select_at(app: &mut App, x: u16, y: u16) -> bool {
+    let r = app.rects.clone();
+    let row_h = app.sp_row_h();
+    let hit_row = |rect: Rect, state: &ListState, len: usize, h: u16| {
+        if hit(rect, x, y) && x != scrollbar_col(rect) { row_index(rect, state, y, len, h) } else { None }
+    };
+    if r.queue.width > 0 && matches!(app.tab, Tab::Local | Tab::Streaming | Tab::Browser) {
+        if let Some(i) = hit_row(r.queue, &app.queue_state, app.queue.len(), 1) {
+            match app.tab {
+                Tab::Local => app.set_focus(Focus::Queue),
+                Tab::Streaming => app.sp_set_pane(PlPane::Queue),
+                _ => app.br_set_pane(PlPane::Queue),
+            }
+            app.queue_state.select(Some(i));
+            return true;
+        }
+    }
+    match app.tab {
+        Tab::Local => {
+            let album_h = if app.show_album_thumbnails { App::ALBUM_ROW_HEIGHT } else { 1 };
+            if let Some(i) = hit_row(r.artists, &app.artist_state, app.view_artists.len(), 1) {
+                app.set_focus(Focus::Artists);
+                app.artist_state.select(Some(i));
+                app.refresh_views();
+            } else if let Some(i) = hit_row(r.albums, &app.album_state, app.view_albums.len(), album_h) {
+                app.set_focus(Focus::Albums);
+                app.album_state.select(Some(i));
+                app.refresh_views();
+            } else if let Some(i) = hit_row(r.tracks, &app.track_state, app.view_tracks.len(), 1) {
+                app.set_focus(Focus::Tracks);
+                app.track_state.select(Some(i));
+            } else {
+                return false;
+            }
+        }
+        Tab::Streaming => {
+            let tracks = app.selected_sp_list().map(|p| p.tracks.len()).unwrap_or(0);
+            if let Some(i) = hit_row(r.sp_list, &app.sp_list_state, app.sp_view.len(), row_h) {
+                app.sp_set_pane(PlPane::List);
+                if app.sp_list_state.selected() != Some(i) {
+                    app.sp_list_state.select(Some(i));
+                    app.sp_move(0);
+                }
+            } else if let Some(i) = hit_row(r.sp_tracks, &app.sp_track_state, tracks, row_h) {
+                app.sp_set_pane(PlPane::Tracks);
+                app.sp_track_state.select(Some(i));
+            } else {
+                return false;
+            }
+        }
+        Tab::Browser => {
+            let items = app.br_current().map(|v| v.items.len()).unwrap_or(0);
+            if let Some(i) = hit_row(r.br_sections, &app.br_sec_state, app.br_section_count(), 1) {
+                app.br_set_pane(PlPane::List);
+                if app.br_sec_state.selected() != Some(i) {
+                    app.br_sec_state.select(Some(i));
+                    app.br_move(0);
+                }
+            } else if let Some(i) = hit_row(r.br_items, &app.br_item_state, items, row_h) {
+                app.br_set_pane(PlPane::Tracks);
+                app.br_item_state.select(Some(i));
+            } else {
+                return false;
+            }
+        }
+        Tab::Playlists => {
+            let tracks = app.selected_playlist().map(|p| p.tracks.len()).unwrap_or(0);
+            if let Some(i) = hit_row(r.pl_list, &app.playlist_state, app.playlists.len(), 1) {
+                app.pl_set_pane(PlPane::List);
+                app.playlist_state.select(Some(i));
+                app.pl_move(0);
+            } else if let Some(i) = hit_row(r.pl_tracks, &app.pl_track_state, tracks, 1) {
+                app.pl_set_pane(PlPane::Tracks);
+                app.pl_track_state.select(Some(i));
+            } else {
+                return false;
+            }
+        }
+        Tab::Settings => return false,
+    }
+    true
 }

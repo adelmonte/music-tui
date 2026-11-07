@@ -5,20 +5,21 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Bar, BarChart, BarGroup, Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph,
 };
-use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui_image::{Resize, StatefulImage};
 
 use crate::app::{App, Focus, PathField, PlPane, Tab};
 use crate::config::Theme;
+use crate::keys::Action;
 use crate::model::{display_artist, fmt_time};
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let hint_rows = u16::from(app.config.ui.show_hints || app.show_keys);
     let chunks = Layout::vertical([
         Constraint::Length(1), // tab bar
         Constraint::Length(3), // search
         Constraint::Min(5),    // body
-        Constraint::Length(1), // key hints
+        Constraint::Length(hint_rows), // key hints
         Constraint::Length(3), // seek bar
         Constraint::Length(7), // art + transport
     ])
@@ -66,10 +67,68 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         f.render_widget(Paragraph::new(line).block(block), popup);
     }
     if app.show_help {
-        draw_help(f, f.area(), app.tab, app.theme);
+        draw_help(f, f.area(), app.tab, app.theme, &app.keymap);
     }
     if app.show_art_popup {
         draw_art_popup(f, app);
+    }
+    if app.show_keys {
+        draw_key_badges(f, app);
+    }
+    let theme = app.theme;
+    if let Some(menu) = &mut app.menu {
+        crate::menu::draw(f, menu, &theme);
+    }
+}
+
+/// With `?` on: each control's key, drawn on the control itself.
+fn draw_key_badges(f: &mut Frame, app: &App) {
+    let t = app.theme;
+    let r = &app.rects;
+    let km = &app.keymap;
+    let area = f.area();
+    let mut put = |x: u16, y: u16, action: Action| {
+        let key = km.label(action);
+        if key.is_empty() {
+            return;
+        }
+        let w = key.chars().count() as u16 + 2;
+        if y >= area.bottom() || x + w > area.right() {
+            return;
+        }
+        f.render_widget(Paragraph::new(Line::from(chip(&key, &t))), Rect::new(x, y, w, 1));
+    };
+    let buttons = [
+        (r.btn_shuffle, Action::Shuffle),
+        (r.btn_prev, Action::Prev),
+        (r.btn_play, Action::PlayPause),
+        (r.btn_next, Action::Next),
+        (r.btn_repeat, Action::Repeat),
+    ];
+    for (rect, action) in buttons {
+        if rect.width > 0 {
+            put(rect.x, rect.y.saturating_sub(1), action);
+        }
+    }
+    if r.search.width > 0 {
+        put(r.search.x + 2, r.search.y, Action::Search);
+    }
+    if r.seekbar.width > 0 {
+        put(r.seekbar.x + 1, r.seekbar.y.saturating_sub(1), Action::SeekBack);
+        put(r.seekbar.x + 5, r.seekbar.y.saturating_sub(1), Action::SeekForward);
+    }
+    if r.volume.width > 0 {
+        put(r.volume.x, r.volume.y.saturating_sub(1), Action::VolumeUp);
+        put(r.volume.x, r.volume.bottom(), Action::VolumeDown);
+    }
+    if r.art.width > 0 {
+        put(r.art.x, r.art.y, Action::Art);
+    }
+    if r.queue.width > 0 {
+        put(r.queue.right().saturating_sub(6), r.queue.y.saturating_sub(1), Action::ToggleQueue);
+    }
+    if app.tab == Tab::Streaming && r.sp_tracks.width > 0 {
+        put(r.sp_tracks.right().saturating_sub(6), r.sp_tracks.y.saturating_sub(1), Action::Sort);
     }
 }
 
@@ -136,141 +195,121 @@ fn draw_art_popup(f: &mut Frame, app: &mut App) {
 
 fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     let t = app.theme;
-    // Render each tab as its own span (so clicks map to actual glyph positions)
-    // with a │ separator between them.
+    // Each tab is its own span, so clicks map to where it's drawn. With the
+    // shortcuts showing, each carries its key.
     let tabs = app.tabs();
+    let keys = [Action::Tab1, Action::Tab2, Action::Tab3, Action::Tab4, Action::Tab5];
     let mut rects = Vec::with_capacity(tabs.len());
-    let mut x = area.x;
+    let mut x = area.x + 1;
     for (i, &tab) in tabs.iter().enumerate() {
-        let label = format!(" ({}) {} ", i + 1, tab.label());
-        if i > 0 {
-            f.render_widget(
-                Paragraph::new(Span::styled("│", Style::default().fg(t.border))),
-                Rect::new(x, area.y, 1, 1),
-            );
-            x += 1;
+        let mut spans = Vec::new();
+        if app.show_keys
+            && let Some(k) = keys.get(i).map(|a| app.keymap.label(*a)).filter(|k| !k.is_empty())
+        {
+            spans.push(chip(&k, &t));
         }
-        let w = label.chars().count() as u16;
-        let r = Rect::new(x, area.y, w, 1);
-        rects.push((tab, r));
         let style = if app.tab == tab {
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::default().fg(t.muted)
         };
-        f.render_widget(Paragraph::new(Span::styled(label, style)), r);
-        x += w;
+        spans.push(Span::styled(format!(" {} ", tab.label()), style));
+        let w: u16 = spans.iter().map(|s| s.content.chars().count() as u16).sum();
+        let r = Rect::new(x, area.y, w.min(area.right().saturating_sub(x)), 1);
+        rects.push((tab, r));
+        f.render_widget(Paragraph::new(Line::from(spans)), r);
+        x += w + 1;
     }
     app.rects.tabs = rects;
 
-    let hint_str = "music-tui  ·  ? help ";
+    // On the right: what's running in the background, then the keys toggle.
+    let mut right = Vec::new();
+    if let Some(r) = &app.br_radio_building {
+        right.push(Span::styled(format!("◌ building {r}…   "), Style::default().fg(t.accent)));
+    }
+    if app.config.playback.keep_going {
+        right.push(Span::styled("↻ keep going   ", Style::default().fg(t.accent)));
+    }
+    let toggle = app.keymap.label(Action::ShowKeys);
+    let hint_str = if app.show_keys { format!(" {toggle} hide keys ") } else { format!(" {toggle} keys ") };
     let hw = hint_str.chars().count() as u16;
-    let hint = Line::from(hint_str).right_aligned().fg(t.muted);
-    f.render_widget(Paragraph::new(hint), area);
-    app.rects.help_hint = Rect::new(
-        area.x + area.width.saturating_sub(hw),
-        area.y,
-        hw.min(area.width),
-        1,
-    );
+    let hint_style = if app.show_keys {
+        Style::default().fg(t.selection_fg).bg(t.accent)
+    } else {
+        Style::default().fg(t.muted)
+    };
+    right.push(Span::styled(hint_str, hint_style));
+    f.render_widget(Paragraph::new(Line::from(right)).alignment(Alignment::Right), area);
+    app.rects.help_hint = Rect::new(area.right().saturating_sub(hw), area.y, hw.min(area.width), 1);
 }
 
-/// The keys that matter for the focused pane, in words. `None` keys are
-/// shown but not clickable.
-fn hints(app: &App) -> Vec<(&'static str, Option<KeyCode>, &'static str)> {
-    let c = |ch| Some(KeyCode::Char(ch));
-    if !app.panes_focused() {
-        return Vec::new();
-    }
-    let queue_hint = ("Q", c('Q'), if app.config.ui.show_queue { "Hide queue" } else { "Show queue" });
-    let mut h: Vec<(&'static str, Option<KeyCode>, &'static str)> = match app.tab {
-        _ if app.queue_focused() => vec![
-            ("d", c('d'), "Remove"),
-            ("J/K", None, "Move"),
-            ("c", c('c'), "Clear queue"),
-            ("g", c('g'), "Go to…"),
-        ],
-        Tab::Local => vec![
-            ("a", c('a'), "Add to queue"),
-            ("g", c('g'), "Go to… (radio, artist)"),
-            ("/", c('/'), "Search"),
-        ],
-        Tab::Streaming if app.sp_focus == PlPane::List => vec![
-            ("a", c('a'), "Queue list"),
-            ("m", c('m'), "Add list to…"),
-            ("u", c('u'), "Link a playlist"),
-            ("d", c('d'), "Remove"),
-            ("/", c('/'), "Search"),
-        ],
-        Tab::Streaming => vec![
-            ("g", c('g'), "Go to… (radio, artist, album)"),
-            ("f", c('f'), "Like"),
-            ("m", c('m'), "Add to playlist"),
-            ("a", c('a'), "Queue"),
-            ("x", c('x'), "Wrong song?"),
-            ("o", c('o'), "Sort"),
-            ("/", c('/'), "Search"),
-        ],
-        Tab::Browser if app.br_focus == PlPane::List => vec![
-            ("a", c('a'), "Queue all"),
-            ("S", c('S'), "Save as playlist"),
-            ("/", c('/'), "Search"),
-        ],
-        Tab::Browser => {
-            let mut v = vec![
-                ("g", c('g'), "Go to… (radio, artist, album)"),
-                ("f", c('f'), "Like"),
-                ("m", c('m'), "Add to playlist"),
-                ("a", c('a'), "Queue"),
-                ("S", c('S'), "Save list"),
-                ("x", c('x'), "Wrong song?"),
-            ];
-            if !app.br_stack.is_empty() {
-                v.insert(0, ("⌫", Some(KeyCode::Backspace), "Back"));
+/// A key drawn as a small filled tag.
+fn chip<'a>(key: &str, t: &Theme) -> Span<'a> {
+    Span::styled(format!(" {key} "), Style::default().fg(t.selection_fg).bg(t.accent).add_modifier(Modifier::BOLD))
+}
+
+/// The actions that matter for the focused pane, in words.
+fn hints(app: &App) -> Vec<(Action, &'static str)> {
+    use Action as A;
+    let mut h: Vec<(A, &'static str)> = if !app.panes_focused() {
+        Vec::new()
+    } else {
+        match app.tab {
+            _ if app.queue_focused() => vec![(A::Remove, "Remove"), (A::MoveUp, "Move up"), (A::MoveDown, "Move down"), (A::ClearQueue, "Clear")],
+            Tab::Local => vec![(A::Queue, "Add to queue"), (A::PlayNext, "Play next"), (A::GoTo, "Go to…"), (A::Search, "Search")],
+            Tab::Streaming if app.sp_focus == PlPane::List => {
+                vec![(A::Queue, "Queue list"), (A::AddTo, "Add list to…"), (A::LinkPlaylist, "Link a playlist"), (A::Search, "Search")]
             }
-            v
+            Tab::Streaming => vec![
+                (A::GoTo, "Go to…"),
+                (A::Like, "Like"),
+                (A::AddTo, "Add to playlist"),
+                (A::Queue, "Queue"),
+                (A::Reject, "Wrong song?"),
+                (A::Sort, "Sort"),
+            ],
+            Tab::Browser if app.br_focus == PlPane::List => vec![(A::Queue, "Queue all"), (A::SaveList, "Save as playlist"), (A::Search, "Search")],
+            Tab::Browser => {
+                let mut v = vec![(A::GoTo, "Go to…"), (A::Like, "Like"), (A::AddTo, "Add to playlist"), (A::Queue, "Queue"), (A::SaveList, "Save list")];
+                if !app.br_stack.is_empty() {
+                    v.insert(0, (A::Back, "Back"));
+                }
+                v
+            }
+            Tab::Playlists => vec![(A::NewPlaylist, "New from queue"), (A::AppendQueue, "Add queue"), (A::Remove, "Delete list"), (A::RemoveSong, "Remove song")],
+            Tab::Settings => Vec::new(),
         }
-        Tab::Playlists => vec![
-            ("n", c('n'), "New from queue"),
-            ("a", c('a'), "Append queue"),
-            ("d", c('d'), "Delete list"),
-            ("x", c('x'), "Remove song"),
-        ],
-        Tab::Settings => Vec::new(),
     };
     if matches!(app.tab, Tab::Local | Tab::Streaming | Tab::Browser) {
-        h.push(queue_hint);
+        h.push((A::ToggleQueue, if app.config.ui.show_queue { "Hide queue" } else { "Show queue" }));
+    }
+    if app.show_keys {
+        h.push((A::Help, "All shortcuts"));
     }
     h
 }
 
 fn draw_hints(f: &mut Frame, app: &mut App, area: Rect) {
+    app.rects.hints.clear();
+    if area.height == 0 {
+        return;
+    }
     let t = app.theme;
-    let mut all = hints(app);
-    // Status on the right: what's running in the background.
-    let mut right = Vec::new();
-    if let Some(r) = &app.br_radio_building {
-        right.push(Span::styled(format!("◌ building {r}…  "), Style::default().fg(t.accent)));
-    }
-    if app.config.playback.keep_going {
-        right.push(Span::styled("↻ keep going  ", Style::default().fg(t.accent)));
-    }
-    let right_w: u16 = right.iter().map(|s| s.content.chars().count() as u16).sum();
-    let room = area.width.saturating_sub(right_w + 1);
-    let width = |h: &(&str, Option<KeyCode>, &str)| (h.0.chars().count() + h.2.chars().count() + 4) as u16;
+    let mut all: Vec<(String, Action, &str)> =
+        hints(app).into_iter().map(|(a, d)| (app.keymap.label(a), a, d)).filter(|h| !h.0.is_empty()).collect();
+    let right = Span::styled("right-click for more  ", Style::default().fg(t.muted));
+    let room = area.width.saturating_sub(right.content.chars().count() as u16 + 1);
+    let width = |h: &(String, Action, &str)| (h.0.chars().count() + h.2.chars().count() + 4) as u16;
     // Drop hints from the end until they fit.
     while !all.is_empty() && all.iter().map(width).sum::<u16>() + 1 > room {
         all.pop();
     }
     let mut spans = vec![Span::raw(" ")];
     let mut x = area.x + 1;
-    app.rects.hints.clear();
     for h in &all {
         let w = width(h);
-        if let Some(code) = h.1 {
-            app.rects.hints.push((Rect::new(x, area.y, w - 2, 1), code));
-        }
-        spans.push(Span::styled(format!(" {} ", h.0), Style::default().fg(t.selection_fg).bg(t.accent)));
+        app.rects.hints.push((Rect::new(x, area.y, w - 2, 1), h.1));
+        spans.push(chip(&h.0, &t));
         spans.push(Span::styled(format!(" {}", h.2), Style::default().fg(t.muted)));
         spans.push(Span::raw("  "));
         x += w;
@@ -644,6 +683,8 @@ fn draw_library(f: &mut Frame, app: &mut App, area: Rect) {
                 TabExplore => ("Explore tab", on_off(app.config.browser.enabled).into(), true),
                 TabPlaylists => ("Local Playlists tab", on_off(app.config.ui.show_playlists_tab).into(), true),
                 SharedSearch => ("Shared search across tabs", on_off(app.config.ui.shared_search).into(), true),
+                VimKeys => ("Vim keys (h/j/k/l, J/K)", on_off(app.config.ui.vim_keys).into(), true),
+                ShowHints => ("Always show shortcut hints", on_off(app.config.ui.show_hints).into(), true),
                 SpotifyCsv => (
                     "Export file / folder",
                     editing(PathField::SpotifyCsv)
@@ -1355,98 +1396,58 @@ fn balanced_columns(heights: &[usize], n: usize) -> Vec<Vec<usize>> {
         .collect()
 }
 
-/// The `?` help panel: every shortcut, grouped by task, in balanced columns.
-/// The current tab's section comes first.
-fn draw_help(f: &mut Frame, area: Rect, tab: Tab, t: Theme) {
-    type Section = (&'static str, Vec<(&'static str, &'static str)>);
-    let songs: Section = (
-        "Spotify & Explore",
+/// The help panel: every shortcut from the live keymap, grouped by task,
+/// in balanced columns. The current tab's section comes first.
+fn draw_help(f: &mut Frame, area: Rect, tab: Tab, t: Theme, km: &crate::keys::Keymap) {
+    use crate::keys::ACTIONS;
+    let mut sections: Vec<(&str, Vec<(String, &str)>)> = Vec::new();
+    for &(_, action, _, group, desc) in ACTIONS {
+        if matches!(action, Action::Tab2 | Action::Tab3 | Action::Tab4 | Action::Tab5) {
+            continue;
+        }
+        let keys = km.keys(action);
+        let (key, desc) = if action == Action::Tab1 {
+            let ends: Vec<String> = [Action::Tab1, Action::Tab5].iter().map(|a| km.label(*a)).collect();
+            (format!("{} – {}", ends[0], ends[1]), "Switch tab")
+        } else {
+            // A second key only when both stay short.
+            let labels: Vec<String> = keys.iter().take(2).map(|c| c.label()).collect();
+            let both = labels.join("  ");
+            let key = if both.chars().count() <= 8 { both } else { labels.first().cloned().unwrap_or_default() };
+            (key, desc)
+        };
+        if key.trim().is_empty() || key == " – " {
+            continue;
+        }
+        match sections.iter_mut().find(|s| s.0 == group) {
+            Some(s) => s.1.push((key, desc)),
+            None => sections.push((group, vec![(key, desc)])),
+        }
+    }
+    sections.push((
+        "Mouse",
         vec![
-            ("g", "go to: radio · artist · album"),
-            ("G", "keep going after the queue"),
-            ("f", "like / unlike"),
-            ("m", "add to a playlist"),
-            ("x", "wrong song? re-match"),
-            ("S", "save list (Explore)"),
-            ("⌫", "back (Explore)"),
-            ("o", "sort (Spotify)"),
-            ("u  d", "link / unlink (Spotify)"),
-            ("R", "re-import (Spotify)"),
+            ("right-click".into(), "menu, with each key"),
+            ("double-click".into(), "play"),
+            ("middle-click".into(), "add to queue"),
+            ("drag".into(), "seek · volume · scroll"),
+            ("drag divider".into(), "resize panes"),
         ],
-    );
-    let local_playlists: Section = (
-        "Local playlists",
+    ));
+    sections.push((
+        "Search editing",
         vec![
-            ("n", "new from queue"),
-            ("a", "append the queue"),
-            ("d", "delete playlist"),
-            ("x", "remove song"),
+            ("^A  ^E".into(), "start / end of line"),
+            ("^W  Alt+⌫".into(), "delete word"),
+            ("^U  ^K".into(), "delete to start / end"),
+            ("^Y".into(), "paste deleted text"),
+            ("Alt+B  Alt+F".into(), "word left / right"),
         ],
-    );
-    let mut sections: Vec<Section> = vec![
-        (
-            "Getting around",
-            vec![
-                ("1 – 5", "switch tab"),
-                ("Tab  ⇧Tab", "next / previous area"),
-                ("↑ ↓  j k", "move"),
-                ("← →  h l", "change pane"),
-                ("Enter", "play / open"),
-                ("/", "search"),
-                ("Esc", "clear search · back"),
-                ("?", "this help"),
-                ("q", "quit"),
-            ],
-        ),
-        (
-            "Playback",
-            vec![
-                ("Space", "play / pause"),
-                ("n  p", "next / previous"),
-                ("[  ]", "seek −5 s / +5 s"),
-                ("+  −", "volume"),
-                ("s", "shuffle"),
-                ("r", "repeat: off · all · one"),
-                ("i", "big album art"),
-            ],
-        ),
-        (
-            "Queue",
-            vec![
-                ("a", "add to queue"),
-                ("Q", "show / hide queue"),
-                ("d", "remove (in the queue)"),
-                ("J  K", "move up / down"),
-                ("c", "clear queue"),
-            ],
-        ),
-        songs,
-        local_playlists,
-        (
-            "Mouse & layout",
-            vec![
-                ("click", "select · run a hint"),
-                ("double-click", "play"),
-                ("drag", "seek · volume · scroll"),
-                ("drag divider", "resize panes"),
-                ("Alt+[  Alt+]", "resize focused pane"),
-            ],
-        ),
-        (
-            "Search editing",
-            vec![
-                ("^A  ^E", "start / end of line"),
-                ("^W  Alt+⌫", "delete word"),
-                ("^U  ^K", "delete to start / end"),
-                ("^Y", "paste deleted text"),
-                ("Alt+B  Alt+F", "word left / right"),
-            ],
-        ),
-    ];
+    ));
     // The section for the tab in use goes first.
     let mine = match tab {
-        Tab::Streaming | Tab::Browser => Some(3),
-        Tab::Playlists => Some(4),
+        Tab::Streaming | Tab::Browser => sections.iter().position(|s| s.0 == "Songs"),
+        Tab::Playlists => sections.iter().position(|s| s.0 == "Local Playlists"),
         _ => None,
     };
     if let Some(i) = mine {
@@ -1484,10 +1485,12 @@ fn draw_help(f: &mut Frame, area: Rect, tab: Tab, t: Theme) {
                     Span::styled(label, label_style),
                     Span::styled("─".repeat(rule), Style::default().fg(t.border)),
                 ]));
-                let key_w = entries.iter().map(|e| e.0.chars().count()).max().unwrap_or(1);
+                let key_w = entries.iter().map(|e| e.0.chars().count()).max().unwrap_or(1).min(col_w / 2);
                 for (key, desc) in entries {
+                    let key = fit(key, key_w);
+                    let pad = key_w.saturating_sub(key.chars().count());
                     lines.push(Line::from(vec![
-                        Span::styled(format!(" {key:>key_w$}  "), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!(" {}{key}  ", " ".repeat(pad)), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)),
                         Span::raw(fit(desc, col_w.saturating_sub(key_w + 4))),
                     ]));
                 }
@@ -1503,7 +1506,10 @@ fn draw_help(f: &mut Frame, area: Rect, tab: Tab, t: Theme) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .title(Line::from(Span::styled(" Keyboard shortcuts ", Style::default().fg(t.accent).add_modifier(Modifier::BOLD))))
-        .title_bottom(Line::from(Span::styled(" any key closes ", Style::default().fg(t.muted))).right_aligned())
+        .title_bottom(
+            Line::from(Span::styled(" change them under [keys] in config.toml · any key closes ", Style::default().fg(t.muted)))
+                .right_aligned(),
+        )
         .border_style(Style::default().fg(t.accent))
         .padding(ratatui::widgets::Padding::new(1, 1, 1, 0));
     let inner = block.inner(popup);
@@ -1656,3 +1662,4 @@ fn strip_year_bracket(s: &str) -> &str {
     }
     s
 }
+

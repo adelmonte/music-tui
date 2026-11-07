@@ -6,6 +6,8 @@ mod db;
 mod deezer;
 mod opus;
 mod input;
+mod keys;
+mod menu;
 mod ipc;
 mod model;
 mod playlist;
@@ -115,15 +117,23 @@ fn run(
         let poll_ms = if app.thumbs_pending() { 30 } else if busy { 100 } else { 500 };
         let had_event = if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
-                Event::Key(k) if k.kind == KeyEventKind::Press => input::handle_key(app, k),
-                Event::Mouse(m) => input::handle_mouse(app, m),
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    input::handle_key(app, k);
+                    true
+                }
+                // Plain pointer motion only matters to an open menu.
+                Event::Mouse(m) if m.kind == event::MouseEventKind::Moved && app.menu.is_none() => false,
+                Event::Mouse(m) => {
+                    input::handle_mouse(app, m);
+                    true
+                }
                 Event::Resize(_, _) => {
                     app.on_resize();
                     dirty = true;
+                    true
                 }
-                _ => {}
+                _ => true,
             }
-            true
         } else {
             false
         };

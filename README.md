@@ -79,33 +79,42 @@ MP3, FLAC, WAV, AIFF, Ogg Vorbis, and MP4/AAC/ALAC are decoded via
 [Symphonia](https://github.com/pdeljanov/Symphonia); Ogg Opus is decoded with libopus.
 Tags and cover art are read with [lofty](https://github.com/Serial-ATA/lofty).
 
-## Keyboard shortcuts
+## Mouse and keyboard
 
-Press `?` in the app for the full list. Highlights:
+Everything works with the mouse:
+
+- **Right-click** any song, album, artist, playlist or queue entry for its menu: play,
+  play next, add to queue, like, add to a playlist, song radio, go to the artist or album,
+  sort, remove. Each item shows its key on the right, so the menu doubles as a cheat sheet.
+- **Double-click** plays; **middle-click** adds to the queue.
+- Click tabs and the playback buttons; drag the progress bar, the volume, the scrollbars
+  and the pane dividers.
+
+Press `?` (or click **? keys** in the top-right) to show the keys on screen, drawn on the
+controls themselves and in a row for the focused pane. `F1` lists every shortcut.
 
 | Key | Action |
 | --- | --- |
 | `1`–`5` | switch tab (Local · Spotify · Explore · Local Playlists · Settings; hidden tabs are skipped) |
-| `/` | focus search (each tab keeps its own search); `Esc` clears it |
+| `/` | search (each tab keeps its own search); `Esc` clears it |
 | `Tab` / `Shift-Tab` | cycle focus in every tab: search → panes → queue → progress → buttons → volume |
-| `↑↓` or `k`/`j` | move selection |
-| `←→` or `h`/`l` | change column |
+| `↑↓` `←→` | move / change pane |
 | `Enter` | open artist/album · play track |
-| `a` | append selection to the queue |
-| `c` | clear queue |
-| `Q` | show / hide the queue (Local, Spotify and Explore tabs) |
-| `Space` | play / pause |
-| `n` / `p` | next / previous |
-| `s` / `r` | shuffle / repeat (off → all → one) |
-| `g` | **Go to…** menu for the highlighted (or playing) song: song radio, artist, album |
+| `a` / `A` | add to the queue / play next |
+| `l` | like / unlike (`f` works too) |
+| `m` | add to a playlist |
+| `g` | **Go to…** song radio, artist, album |
 | `G` | keep going: queue similar songs when the queue runs out |
-| `+` / `-` | volume |
-| `[` / `]` | seek −/+ 5s |
-| `Alt+]` / `Alt+[` | grow / shrink the focused column (or the queue when it's focused) |
+| `Shift+F10` | the right-click menu for the highlighted item |
+| `Q` / `c` | show / hide the queue / clear it |
+| `Space` · `n` / `p` | play / pause · next / previous |
+| `s` / `r` | shuffle / repeat (off → all → one) |
+| `+` / `-` · `[` / `]` | volume · seek −/+ 5s |
+| `Alt+]` / `Alt+[` | grow / shrink the focused pane |
 | `q` / `Ctrl-C` | quit |
 
-The bar under the panes always shows the main keys for the focused pane, and each
-one can be clicked.
+Vim keys (`h`/`j`/`k`/`l`, `J`/`K`) are off by default; turn them on in Settings. Every
+shortcut can be changed under `[keys]` in the config (see below).
 
 ### The queue
 
@@ -119,15 +128,13 @@ With the Queue panel focused:
 | Key | Action |
 | --- | --- |
 | `Enter` | play that item |
-| `d` / `Delete` | remove the item (`a` also works) |
-| `J` / `K` or `Shift+↓` / `Shift+↑` | move the item down / up |
-| `c` | clear the whole queue (works from any panel) |
+| `A` | play it next |
+| `d` / `Delete` | remove the item |
+| `Shift+↓` / `Shift+↑` | move the item down / up (`J` / `K` with vim keys) |
+| `c` | clear the whole queue |
 
 In the **Local Playlists** tab (can be hidden in Settings): `n` save the current queue as a new playlist, `a` append the
 queue to the selected playlist, `d` delete a playlist, `x` remove a track, `Enter` play.
-
-Mouse: click rows, tabs, and transport buttons; drag the progress/volume bars and the
-pane dividers.
 
 ## Spotify and streaming
 
@@ -182,7 +189,7 @@ To keep songs, copy their folders into your music directory (Settings → Downlo
 | Key | Action |
 | --- | --- |
 | `Enter` | play the list from the highlighted song |
-| `f` | like / unlike (Liked Songs) |
+| `l` | like / unlike (Liked Songs) |
 | `m` | add to a playlist (or a new one) |
 | `a` | add the song (or the whole list) to the queue |
 | `d` | remove the song from the list, or unlink a linked playlist |
@@ -269,6 +276,8 @@ sort_articles = true        # display/sort "The Doors" as "Doors, The"
 show_album_thumbnails = true
 show_playlists_tab = true   # the Local Playlists tab
 shared_search = false       # one search for all tabs (default: each tab keeps its own)
+vim_keys = false            # h/j/k/l and J/K on top of the arrows
+show_hints = false          # keep the row of key hints visible (otherwise ? shows it)
 
 [spotify]
 enabled = false                          # the Spotify tab
@@ -277,6 +286,13 @@ links = []                               # linked playlist URLs (added with `u`)
 
 [browser]
 enabled = true                           # the Explore tab
+
+# Change any shortcut: an action name and its keys. An empty list unbinds it.
+# The names are in src/keys.rs; F1 in the app shows what each key does.
+[keys]
+like = ["l"]
+play_next = ["A", "Ctrl+N"]
+sort = []
 ```
 
 ## Files and directories

@@ -18,6 +18,8 @@ use crate::scan::{self, ScanMsg};
 use crate::deezer;
 use crate::spotify;
 
+mod actions;
+
 /// Everything Tab can land on. `Search` is the text field; the rest are the
 /// browseable lists. Mouse hit-testing and column movement only concern the
 /// four list variants.
@@ -170,6 +172,8 @@ pub enum SettingRow {
     TabExplore,
     TabPlaylists,
     SharedSearch,
+    VimKeys,
+    ShowHints,
     SpotifyCsv,
     SpotifyReimport,
     SpotifyLinks,
@@ -351,7 +355,7 @@ pub enum AddTarget {
 
 /// The `m` "add to playlist" popup.
 /// What the "Go to…" menu offers.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GotoKind {
     Radio,
     Artist,
@@ -401,8 +405,8 @@ struct FetchMsg {
 /// clicks. The list rects are the *inner* content areas (inside borders).
 #[derive(Default, Clone)]
 pub struct Rects {
-    /// Clickable key hints in the hint bar, and the key each one presses.
-    pub hints: Vec<(Rect, crossterm::event::KeyCode)>,
+    /// Clickable key hints in the hint bar, and the action each one runs.
+    pub hints: Vec<(Rect, crate::keys::Action)>,
     pub search: Rect,
     pub artists: Rect,
     pub albums: Rect,
@@ -551,6 +555,11 @@ pub struct App {
     pub repeat: RepeatMode,
 
     pub show_help: bool,
+    /// Shortcuts drawn over the screen (`?`).
+    pub show_keys: bool,
+    pub keymap: crate::keys::Keymap,
+    /// The right-click menu.
+    pub menu: Option<crate::menu::Menu>,
     pub status: String,
     /// The persistent now-playing line shown when no transient message is active.
     now_playing: String,
@@ -635,6 +644,7 @@ impl App {
         let cache_all_art = config.ui.cache_all_art;
         let show_album_thumbnails = config.ui.show_album_thumbnails;
         let playlists = playlist::load();
+        let (keymap, key_problems) = crate::keys::Keymap::new(&config.keys, config.ui.vim_keys);
         let (art_tx, art_rx) = channel::<ArtMsg>();
         let (row_thumb_tx, row_thumb_rx) = channel::<RowThumbMsg>();
         let (fetch_tx, fetch_rx) = channel::<FetchMsg>();
@@ -747,6 +757,9 @@ impl App {
             row_thumb_order: Default::default(),
             rng: seed,
             scan_rx: None,
+            show_keys: false,
+            keymap,
+            menu: None,
         };
         app.refresh_views();
         app.clamp_pl_states();
@@ -755,7 +768,7 @@ impl App {
             app.load_spotify();
         }
         if app.library.is_empty() {
-            app.status = "Library empty — press 3 for settings, then r to scan.".into();
+            app.status = "Library empty — open the Settings tab, then r to scan.".into();
         } else {
             app.status = format!("{} tracks loaded.", app.library.tracks.len());
         }
@@ -764,6 +777,9 @@ impl App {
             app.start_art_precache();
         }
         app.restore_session();
+        if !key_problems.is_empty() {
+            app.notify(format!("[keys] in config.toml: {}", key_problems.join("; ")));
+        }
         app
     }
 
@@ -1741,6 +1757,14 @@ impl App {
         }
     }
 
+    /// The highlighted song in the Local tab (songs column or queue).
+    fn local_target_track(&self) -> Option<Track> {
+        match self.focus {
+            Focus::Queue => self.queue_selected_track(),
+            _ => self.track_state.selected().and_then(|i| self.view_tracks.get(i).cloned()),
+        }
+    }
+
     /// The highlighted queue entry.
     fn queue_selected_track(&self) -> Option<Track> {
         self.queue_state.selected().and_then(|i| self.queue.get(i).cloned())
@@ -1750,6 +1774,7 @@ impl App {
     pub fn like_current(&mut self) {
         let track = match self.tab {
             Tab::Browser => self.br_target_track(),
+            Tab::Local => self.local_target_track(),
             _ => self.sp_target_track(),
         };
         if let Some(t) = track {
@@ -1761,8 +1786,17 @@ impl App {
     /// when the list pane is focused).
     pub fn open_add_menu(&mut self) {
         let tracks: Vec<Track> = match (self.tab, self.br_focus, self.sp_focus) {
+            (Tab::Local, ..) => match self.focus {
+                Focus::Artists | Focus::Albums => {
+                    let q = self.search.to_lowercase();
+                    let artist = self.selected_artist();
+                    let album = if self.focus == Focus::Albums { self.selected_album() } else { None };
+                    self.library.tracks_view(&q, artist.as_deref(), album.as_ref())
+                }
+                _ => self.local_target_track().into_iter().collect(),
+            },
             (Tab::Browser, PlPane::List, _) => self.br_current().map(|v| v.tracks()).unwrap_or_default(),
-            (Tab::Browser, PlPane::Tracks, _) => self.br_target_track().into_iter().collect(),
+            (Tab::Browser, ..) => self.br_target_track().into_iter().collect(),
             (_, _, PlPane::List) => self.selected_sp_list().map(|p| p.tracks.clone()).unwrap_or_default(),
             _ => self.sp_target_track().into_iter().collect(),
         };
@@ -1962,6 +1996,9 @@ impl App {
             TabExplore,
             TabPlaylists,
             SharedSearch,
+            Header("Keys"),
+            VimKeys,
+            ShowHints,
             Header("Spotify"),
             SpotifyCsv,
         ];
@@ -2014,6 +2051,8 @@ impl App {
             TabExplore => self.toggle_browser(),
             TabPlaylists => self.toggle_playlists_tab(),
             SharedSearch => self.toggle_shared_search(),
+            VimKeys => self.toggle_vim_keys(),
+            ShowHints => self.toggle_show_hints(),
             SpotifyReimport => self.reimport_spotify(),
             SpotifyLinks => self.begin_link_input(),
             DownloadsDir => open_in_file_manager(&spotify::music_root()),
@@ -2048,7 +2087,10 @@ impl App {
                 | SettingRow::BigIcons
                 | SettingRow::TabSpotify
                 | SettingRow::TabExplore
-                | SettingRow::TabPlaylists,
+                | SettingRow::TabPlaylists
+                | SettingRow::SharedSearch
+                | SettingRow::VimKeys
+                | SettingRow::ShowHints,
             ) => self.settings_activate(),
             _ => {}
         }
@@ -2741,7 +2783,11 @@ impl App {
 
     /// `o` in the Spotify tab: cycle the track order of every list.
     pub fn sp_cycle_sort(&mut self) {
-        self.sp_sort = self.sp_sort.next();
+        self.sp_set_sort(self.sp_sort.next());
+    }
+
+    pub fn sp_set_sort(&mut self, sort: SpSort) {
+        self.sp_sort = sort;
         self.apply_sp_sort();
         self.refresh_sp_view();
         let has = self.selected_sp_list().is_some_and(|p| !p.tracks.is_empty());
