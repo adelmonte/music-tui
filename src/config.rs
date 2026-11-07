@@ -34,6 +34,8 @@ pub struct Config {
     pub radio: RadioConfig,
     #[serde(default)]
     pub podcasts: PodcastConfig,
+    #[serde(default)]
+    pub sync: SyncConfig,
     /// Shortcut overrides: action name → keys (see `keys::ACTIONS`).
     #[serde(default)]
     pub keys: std::collections::HashMap<String, Vec<String>>,
@@ -82,6 +84,26 @@ fn default_speed() -> f32 {
 impl Default for PodcastConfig {
     fn default() -> Self {
         Self { enabled: true, speed: 1.0 }
+    }
+}
+
+/// Resume sync through a `music-tui serve` server. Off while `server` is empty.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncConfig {
+    /// e.g. "http://192.168.1.50:7700".
+    #[serde(default)]
+    pub server: String,
+    /// From `music-tui serve add-user <name>` on the server.
+    #[serde(default)]
+    pub key: String,
+    /// How this machine is named to the others (default: its hostname).
+    #[serde(default)]
+    pub device: String,
+}
+
+impl SyncConfig {
+    pub fn enabled(&self) -> bool {
+        !self.server.is_empty() && !self.key.is_empty()
     }
 }
 
@@ -300,6 +322,7 @@ impl Default for Config {
             browser: BrowserConfig::default(),
             radio: RadioConfig::default(),
             podcasts: PodcastConfig::default(),
+            sync: SyncConfig::default(),
             keys: Default::default(),
         }
     }
@@ -412,6 +435,13 @@ pub fn db_path() -> PathBuf {
     project_dirs()
         .map(|d| d.data_dir().join("library.db"))
         .unwrap_or_else(|| PathBuf::from("music-tui-library.db"))
+}
+
+/// The sync server's database, e.g. ~/.local/share/music-tui/sync.db.
+pub fn sync_db_path() -> PathBuf {
+    project_dirs()
+        .map(|d| d.data_dir().join("sync.db"))
+        .unwrap_or_else(|| PathBuf::from("music-tui-sync.db"))
 }
 
 /// Path to the saved playlists file, e.g. ~/.local/share/music-tui/playlists.toml.

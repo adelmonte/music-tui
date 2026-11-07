@@ -1,0 +1,15 @@
+# The music-tui sync server as a user service:
+#   cp contrib/music-tui-sync.service ~/.config/systemd/user/
+#   systemctl --user enable --now music-tui-sync
+#   loginctl enable-linger "$USER"   # keep it running while logged out
+[Unit]
+Description=music-tui sync server
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/music-tui serve
+# Environment=MUSIC_TUI_LISTEN=0.0.0.0:7700
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

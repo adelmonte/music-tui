@@ -56,6 +56,16 @@ fn ids() -> &'static Mutex<HashMap<PathBuf, String>> {
     IDS.get_or_init(Default::default)
 }
 
+pub fn station_id(path: &std::path::Path) -> Option<String> {
+    ids().lock().ok()?.get(path).cloned()
+}
+
+pub fn set_station_id(path: &std::path::Path, id: &str) {
+    if let Ok(mut ids) = ids().lock() {
+        ids.entry(path.to_path_buf()).or_insert_with(|| id.to_string());
+    }
+}
+
 fn station(v: &Value) -> Option<Track> {
     let url = v["url_resolved"].as_str().filter(|u| !u.is_empty()).or(v["url"].as_str())?;
     if !url.starts_with("http") {

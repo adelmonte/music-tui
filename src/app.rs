@@ -20,6 +20,7 @@ use crate::spotify;
 
 mod actions;
 mod streams;
+mod sync;
 pub use streams::is_station;
 
 /// Everything Tab can land on. `Search` is the text field; the rest are the
@@ -165,6 +166,9 @@ struct Session {
     /// Each tab's search text, by tab name.
     #[serde(default)]
     searches: std::collections::BTreeMap<String, String>,
+    /// When playback last changed (Unix ms), against the sync server's record.
+    #[serde(default)]
+    synced: i64,
 }
 
 /// One row of the Settings tab. Headers aren't selectable.
@@ -612,6 +616,10 @@ pub struct App {
     /// The session as last written, so periodic saves skip unchanged state.
     last_session: String,
     last_session_at: Instant,
+    sync: sync::SyncState,
+    /// A track loaded from a saved or synced session that isn't playable yet
+    /// (not fetched, or a stream): where to start it once it is.
+    resume_at: Option<(PathBuf, f64)>,
     /// The list whose covers are being prefetched to disk, and the job
     /// generation (bumping it stops the running job).
     cover_job: String,
@@ -776,6 +784,8 @@ impl App {
             cache_stats_at: None,
             last_session: String::new(),
             last_session_at: Instant::now(),
+            sync: Default::default(),
+            resume_at: None,
             cover_job: String::new(),
             cover_gen: Default::default(),
             radio_extending: false,
@@ -823,6 +833,7 @@ impl App {
             app.request_fetch(&track, false);
         }
         app.restore_session();
+        app.sync_start();
         if !key_problems.is_empty() {
             app.notify(format!("[keys] in config.toml: {}", key_problems.join("; ")));
         }
@@ -831,13 +842,22 @@ impl App {
 
     // --- session ---------------------------------------------------------
 
-    fn session(&self) -> Session {
-        let position_secs = match self.now.and_then(|i| self.queue.get(i)) {
+    /// How far into the current track playback is (or will start).
+    fn position_secs(&self) -> f64 {
+        match self.now.and_then(|i| self.queue.get(i)) {
             Some(t) if self.audio.current_path() == Some(t.path.as_path()) => {
                 self.audio.position().as_secs_f64()
             }
-            _ => 0.0,
-        };
+            Some(t) => match &self.resume_at {
+                Some((p, pos)) if *p == t.path => *pos,
+                _ => 0.0,
+            },
+            None => 0.0,
+        }
+    }
+
+    fn session(&self) -> Session {
+        let position_secs = self.position_secs();
         Session {
             tab: format!("{:?}", self.tab),
             queue: self.queue.clone(),
@@ -860,6 +880,7 @@ impl App {
             sp_track: self.sp_track_state.selected(),
             sp_tracks_focused: self.sp_focus == PlPane::Tracks,
             sp_sort: format!("{:?}", self.sp_sort),
+            synced: self.sync.updated,
         }
     }
 
@@ -953,17 +974,28 @@ impl App {
             *state.offset_mut() = state.selected().unwrap_or(0).saturating_sub(3);
         }
 
+        self.sync.updated = s.synced;
         self.queue = s.queue;
         self.queue_state.select(s.queue_sel.filter(|&i| i < self.queue.len()));
         let Some(i) = s.now.filter(|&i| i < self.queue.len()) else { return };
+        self.load_paused(i, s.position_secs);
+    }
+
+    /// Make queue entry `i` the current track, paused at `position`. Tracks
+    /// that can't be opened yet (unfetched, streams) start there on play.
+    fn load_paused(&mut self, i: usize, position: f64) {
+        let Some(track) = self.queue.get(i).cloned() else { return };
         self.now = Some(i);
-        let track = self.queue[i].clone();
-        if !track.path.exists() || self.audio.play(&track.path, track.length_secs).is_err() {
+        self.resume_at = None;
+        if spotify::needs_fetch(&track.path) || crate::stream::is_url(&track.path) {
+            self.resume_at = Some((track.path.clone(), position));
+        } else if !track.path.exists() || self.audio.play(&track.path, track.length_secs).is_err() {
             return;
-        }
-        self.audio.toggle_pause();
-        if s.position_secs > 1.0 {
-            self.audio.seek_to(Duration::from_secs_f64(s.position_secs));
+        } else {
+            self.audio.toggle_pause();
+            if position > 1.0 {
+                self.audio.seek_to(Duration::from_secs_f64(position));
+            }
         }
         self.set_now_playing(&track);
         self.now_playing = format!("⏸ {} — {}  (Space to resume)", track.title, track.track_artist);
@@ -1525,6 +1557,12 @@ impl App {
                 self.request_art(track.path.clone());
                 self.prefetch_next();
                 self.on_track_started(&track);
+                if let Some((path, pos)) = self.resume_at.take()
+                    && path == track.path
+                    && pos > 1.0
+                {
+                    self.audio.seek_to(Duration::from_secs_f64(pos));
+                }
             }
             Err(e) => {
                 self.status = format!("Error: {e}");
@@ -3506,6 +3544,13 @@ impl App {
     }
 
     pub fn toggle_pause(&mut self) {
+        // A restored track that isn't open yet: start it.
+        if self.audio.current_path().is_none()
+            && let Some(i) = self.now.filter(|&i| i < self.queue.len())
+        {
+            self.play_index(i);
+            return;
+        }
         self.audio.toggle_pause();
     }
 
@@ -4153,6 +4198,7 @@ impl App {
                 }
             }
 
+        self.sync_tick();
         if self.last_session_at.elapsed() >= Duration::from_secs(5) {
             self.last_session_at = Instant::now();
             self.save_session();

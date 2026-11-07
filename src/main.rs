@@ -14,8 +14,10 @@ mod playlist;
 mod podcast;
 mod radio;
 mod scan;
+mod serve;
 mod spotify;
 mod stream;
+mod sync;
 mod ui;
 
 use std::io::stdout;
@@ -36,6 +38,10 @@ use config::Config;
 use model::Library;
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("serve") {
+        return serve::main(&args[2..]);
+    }
     // Handle remote-control flags before touching the audio device or display.
     if let Some(cmd) = ipc::parse_flag() {
         if let Err(e) = ipc::send_cmd(cmd) {
@@ -94,6 +100,7 @@ fn main() -> Result<()> {
 
     let res = run(&mut terminal, &mut app, cmd_rx);
     app.save_session();
+    app.sync_on_quit();
 
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(stdout(), DisableMouseCapture);

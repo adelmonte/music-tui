@@ -286,6 +286,62 @@ The running instance listens on a Unix domain socket
 (`$XDG_RUNTIME_DIR/music-tui.sock`, e.g. `/run/user/1000/music-tui.sock`).
 The flag invocation connects, sends the command, and exits immediately.
 
+## Sync
+
+Pause a song on one device and the others open at that song and position:
+music-tui, [music-android](https://github.com/adelmonte/music-android) and
+[music-kodi](https://github.com/adelmonte/music-kodi) share the queue, the
+current song and where it stopped through a small server you run yourself.
+There's no public server: sync is off until you point the apps at yours.
+
+Each app pushes its queue and position when you pause, change song or quit (and
+every 30 seconds while playing), and fetches the newest one when it starts. A
+record only replaces another if it's newer. An app takes another device's queue
+only if you haven't started playing anything there yet. Then it shows the queue
+paused, and Space carries on. Saved songs, likes and playlists stay on each
+device; songs from your local library travel as artist and title, and each
+device plays its own copy or streams it.
+
+### The server
+
+`music-tui serve` is the server, built into the same binary. Run it on a machine
+that's always on (a home server, a Raspberry Pi, a NAS, a VPS):
+
+```sh
+music-tui serve add-user alice   # prints alice's key
+music-tui serve                  # listens on 0.0.0.0:7700
+music-tui serve users            # who synced last, and when
+music-tui serve remove-user alice
+```
+
+`--listen ADDR` (or `$MUSIC_TUI_LISTEN`) changes the address, and `--db FILE`
+(or `$MUSIC_TUI_SYNC_DB`) the database, `~/.local/share/music-tui/sync.db` by
+default. Every request carries a user's key; each user sees only their own
+record, and the server stores only a hash of each key. To keep it running,
+[`contrib/music-tui-sync.service`](contrib/music-tui-sync.service) is a systemd
+user unit.
+
+The apps only need an address they can reach: your home network
+(`http://192.168.1.50:7700`), a VPN like [Tailscale](https://tailscale.com) or
+WireGuard when you're away, or a reverse proxy such as Caddy for an HTTPS
+address. The server speaks plain HTTP, so put HTTPS (or a VPN) in front of it
+before exposing it to the internet: the key is what keeps strangers out, and
+HTTPS keeps it private on the way.
+
+### The apps
+
+In music-tui's `config.toml`:
+
+```toml
+[sync]
+server = "http://192.168.1.50:7700"
+key = "the key from add-user"
+device = "laptop"          # optional; how it's named to the others (default: the hostname)
+```
+
+In music-android: *Settings → Sync*. In music-kodi: the add-on's settings, *Sync*,
+and the *Continue* item at the top of its menu.
+
 ## Configuration
 
 Settings live in `config.toml` (path shown in the Settings tab). Edits are applied on
@@ -360,6 +416,7 @@ macOS and Windows use their respective conventions via the
 | `~/.local/share/music-tui/podcasts.toml` | podcast subscriptions, where you stopped in each episode, finished episodes |
 | `~/.local/share/music-tui/spotify_matches.toml` | which YouTube video each song uses, and rejected ones |
 | `~/.local/share/music-tui/session.toml` | queue and position to resume from |
+| `~/.local/share/music-tui/sync.db` | the sync server's users and records (`music-tui serve` only) |
 | `~/.cache/music-tui/covers/` | resized thumbnails of oversized local album art |
 | `~/.cache/music-tui/spotify/music/` | downloaded songs, filed by artist and album |
 | `~/.cache/music-tui/spotify/audio/` | links from song IDs to the downloaded files |
