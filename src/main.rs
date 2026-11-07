@@ -3,11 +3,16 @@ mod art;
 mod audio;
 mod config;
 mod db;
+mod deezer;
+mod opus;
 mod input;
+mod keys;
+mod menu;
 mod ipc;
 mod model;
 mod playlist;
 mod scan;
+mod spotify;
 mod ui;
 
 use std::io::stdout;
@@ -85,6 +90,7 @@ fn main() -> Result<()> {
     );
 
     let res = run(&mut terminal, &mut app, cmd_rx);
+    app.save_session();
 
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(stdout(), DisableMouseCapture);
@@ -102,19 +108,32 @@ fn run(
     loop {
         // Poll frequently while playing/scanning so position and progress stay
         // current; also stay responsive when remote commands may arrive.
-        let poll_ms =
-            if app.audio.is_playing() || app.scanning.is_some() || cmd_rx.is_some() { 100 } else { 500 };
+        let busy = app.audio.is_playing()
+            || app.scanning.is_some()
+            || !app.fetching.is_empty()
+            || cmd_rx.is_some();
+        // Covers still loading: check back quickly so each shows as soon as
+        // it's decoded.
+        let poll_ms = if app.thumbs_pending() { 30 } else if busy { 100 } else { 500 };
         let had_event = if event::poll(Duration::from_millis(poll_ms))? {
             match event::read()? {
-                Event::Key(k) if k.kind == KeyEventKind::Press => input::handle_key(app, k),
-                Event::Mouse(m) => input::handle_mouse(app, m),
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    input::handle_key(app, k);
+                    true
+                }
+                // Plain pointer motion only matters to an open menu.
+                Event::Mouse(m) if m.kind == event::MouseEventKind::Moved && app.menu.is_none() => false,
+                Event::Mouse(m) => {
+                    input::handle_mouse(app, m);
+                    true
+                }
                 Event::Resize(_, _) => {
                     app.on_resize();
                     dirty = true;
+                    true
                 }
-                _ => {}
+                _ => true,
             }
-            true
         } else {
             false
         };

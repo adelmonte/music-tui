@@ -48,7 +48,7 @@ Spotify, YouTube, or Deezer account is needed.
 The Spotify and Explore tabs need these on your `PATH`:
 
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp): finds and downloads songs
-- [`ffmpeg`](https://ffmpeg.org/): used by yt-dlp to unpack the audio
+- [`ffmpeg`](https://ffmpeg.org/): writes the audio out as it downloads, so songs play right away
 
 On Arch: `sudo pacman -S yt-dlp ffmpeg`. The local library works without them.
 
@@ -79,33 +79,42 @@ MP3, FLAC, WAV, AIFF, Ogg Vorbis, and MP4/AAC/ALAC are decoded via
 [Symphonia](https://github.com/pdeljanov/Symphonia); Ogg Opus is decoded with libopus.
 Tags and cover art are read with [lofty](https://github.com/Serial-ATA/lofty).
 
-## Keyboard shortcuts
+## Mouse and keyboard
 
-Press `?` in the app for the full list. Highlights:
+Everything works with the mouse:
+
+- **Right-click** any song, album, artist, playlist or queue entry for its menu: play,
+  play next, add to queue, like, add to a playlist, song radio, go to the artist or album,
+  sort, remove. Each item shows its key on the right, so the menu doubles as a cheat sheet.
+- **Double-click** plays; **middle-click** adds to the queue.
+- Click tabs and the playback buttons; drag the progress bar, the volume, the scrollbars
+  and the pane dividers.
+
+Press `?` (or click **? keys** in the top-right) to show the keys for the focused pane in
+a row at the bottom, and each tab's key. `F1` lists every shortcut.
 
 | Key | Action |
 | --- | --- |
 | `1`–`5` | switch tab (Local · Spotify · Explore · Local Playlists · Settings; hidden tabs are skipped) |
-| `/` | focus search (each tab keeps its own search); `Esc` clears it |
+| `/` | search (each tab keeps its own search); `Esc` clears it |
 | `Tab` / `Shift-Tab` | cycle focus in every tab: search → panes → queue → progress → buttons → volume |
-| `↑↓` or `k`/`j` | move selection |
-| `←→` or `h`/`l` | change column |
+| `↑↓` `←→` | move / change pane |
 | `Enter` | open artist/album · play track |
-| `a` | append selection to the queue |
-| `c` | clear queue |
-| `Q` | show / hide the queue (Local, Spotify and Explore tabs) |
-| `Space` | play / pause |
-| `n` / `p` | next / previous |
-| `s` / `r` | shuffle / repeat (off → all → one) |
-| `g` | **Go to…** menu for the highlighted (or playing) song: song radio, artist, album |
+| `a` / `A` | add to the queue / play next |
+| `l` | like / unlike (`f` works too) |
+| `m` | add to a playlist |
+| `g` | **Go to…** song radio, artist, album |
 | `G` | keep going: queue similar songs when the queue runs out |
-| `+` / `-` | volume |
-| `[` / `]` | seek −/+ 5s |
-| `Alt+]` / `Alt+[` | grow / shrink the focused column (or the queue when it's focused) |
+| `Shift+F10` | the right-click menu for the highlighted item |
+| `Q` / `c` | show / hide the queue / clear it |
+| `Space` · `n` / `p` | play / pause · next / previous |
+| `s` / `r` | shuffle / repeat (off → all → one) |
+| `+` / `-` · `[` / `]` | volume · seek −/+ 5s |
+| `Alt+]` / `Alt+[` | grow / shrink the focused pane |
 | `q` / `Ctrl-C` | quit |
 
-The bar under the panes always shows the main keys for the focused pane, and each
-one can be clicked.
+Vim keys (`h`/`j`/`k`/`l`, `J`/`K`) are off by default; turn them on in Settings. Every
+shortcut can be changed under `[keys]` in the config (see below).
 
 ### The queue
 
@@ -119,15 +128,13 @@ With the Queue panel focused:
 | Key | Action |
 | --- | --- |
 | `Enter` | play that item |
-| `d` / `Delete` | remove the item (`a` also works) |
-| `J` / `K` or `Shift+↓` / `Shift+↑` | move the item down / up |
-| `c` | clear the whole queue (works from any panel) |
+| `A` | play it next |
+| `d` / `Delete` | remove the item |
+| `Shift+↓` / `Shift+↑` | move the item down / up (`J` / `K` with vim keys) |
+| `c` | clear the whole queue |
 
 In the **Local Playlists** tab (can be hidden in Settings): `n` save the current queue as a new playlist, `a` append the
 queue to the selected playlist, `d` delete a playlist, `x` remove a track, `Enter` play.
-
-Mouse: click rows, tabs, and transport buttons; drag the progress/volume bars and the
-pane dividers.
 
 ## Spotify and streaming
 
@@ -148,7 +155,7 @@ downloaded with `yt-dlp`, and Explore uses Deezer's public API.
 4. Open the **Spotify** tab. The export is imported on first launch.
 
 To pick up songs you add on Spotify later, export again, replace the folder's contents, and
-press `R` in the Spotify tab (or Settings → Spotify → Re-import export). New songs are added to the
+use Settings → Spotify → Re-import export. New songs are added to the
 existing lists. Likes, songs you added and lists you made in music-tui are kept.
 
 A single [TuneMyMusic](https://www.tunemymusic.com/) CSV export works too: point the
@@ -164,7 +171,9 @@ name. Only the first 100 songs of a linked playlist are read.
 
 The first time you play a song, music-tui finds it on YouTube Music and downloads YouTube's
 best audio stream (Opus, about 140 kbps). It prefers plain audio uploads to music videos
-and live or remixed versions. The next song in the queue is fetched ahead of time. If a
+and live or remixed versions. A song starts playing once a few seconds have downloaded,
+and the next song in the queue is fetched ahead of time. Downloads always finish, even
+if you skip the song or close music-tui; anything cut off is picked up on the next launch. If a
 match is wrong, press `x` on the song to reject that video and fetch the next-best one.
 
 Downloads are tagged (title, artists, album artist, album, track number, year, ISRC, and
@@ -182,7 +191,7 @@ To keep songs, copy their folders into your music directory (Settings → Downlo
 | Key | Action |
 | --- | --- |
 | `Enter` | play the list from the highlighted song |
-| `f` | like / unlike (Liked Songs) |
+| `l` | like / unlike (Liked Songs) |
 | `m` | add to a playlist (or a new one) |
 | `a` | add the song (or the whole list) to the queue |
 | `d` | remove the song from the list, or unlink a linked playlist |
@@ -191,15 +200,22 @@ To keep songs, copy their folders into your music directory (Settings → Downlo
 | `g` | Go to… song radio, artist page, or album page (in Explore) |
 | `x` | wrong song? Confirms, then fetches the next-best YouTube match |
 | `Tab` | switch between the lists and the songs |
-| `R` | re-import the CSV export |
 | `/` | search the open list |
 
 ### Explore
 
 Search for songs, artists, albums, and playlists (Deezer, with YouTube Music as a
-fallback), browse the charts, or check **For you**, a mix built from the artists you like
-most. `Enter` plays a song or opens an album/artist/playlist, `Backspace`/`Esc` goes back,
-and `f`, `m`, `a`, and `x` work as in the Spotify tab. `S` saves the open list as a playlist
+fallback). The home page is rebuilt from your likes every launch:
+
+- **For you**: a mix from the artists you like most
+- **Because you liked …**: a song radio for each of your three latest likes, minus songs
+  you've already liked
+- **New releases for you**: albums, EPs and singles from the last four months by artists
+  you like
+- **Top songs**, **Top albums**, and **Popular playlists** from Deezer's charts
+
+`Enter` plays a song or opens an album/artist/playlist, `Backspace`/`Esc` goes back,
+and `l`, `m`, `a`, and `x` work as in the Spotify tab. `S` saves the open list as a playlist
 in your Spotify-tab library.
 
 ### Song radio
@@ -246,6 +262,8 @@ selection_fg = "black"
 border = "darkgray"
 dim = "darkgray"
 muted = "gray"
+menu_bg = "#2e3440"       # right-click menu background
+menu_highlight = "#81a1c1"
 
 [layout]
 columns = [25, 30, 45]  # browser column widths (%), kept in sync with on-screen resizing
@@ -262,6 +280,8 @@ sort_articles = true        # display/sort "The Doors" as "Doors, The"
 show_album_thumbnails = true
 show_playlists_tab = true   # the Local Playlists tab
 shared_search = false       # one search for all tabs (default: each tab keeps its own)
+vim_keys = false            # h/j/k/l and J/K on top of the arrows
+show_hints = false          # keep the row of key hints visible (otherwise ? shows it)
 
 [spotify]
 enabled = false                          # the Spotify tab
@@ -270,6 +290,13 @@ links = []                               # linked playlist URLs (added with `u`)
 
 [browser]
 enabled = true                           # the Explore tab
+
+# Change any shortcut: an action name and its keys. An empty list unbinds it.
+# The names are in src/keys.rs; F1 in the app shows what each key does.
+[keys]
+like = ["l"]
+play_next = ["A", "Ctrl+N"]
+sort = []
 ```
 
 ## Files and directories
