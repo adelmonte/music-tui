@@ -1,5 +1,7 @@
 # music-tui
 
+> On Android: **[music-android](https://github.com/adelmonte/music-android)**, the phone companion, with your playlists, radio and podcasts.
+
 <p align="center">
   <img src="screenshots/tour.webp" alt="music-tui: Spotify, Explore and Local tabs" width="900">
 </p>
