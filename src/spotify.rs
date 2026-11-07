@@ -649,26 +649,33 @@ pub fn set_source(track: &Track, video: &str) {
 /// album artist, numbering, year). With `reject`, the currently matched video
 /// is first added to the track's rejected list (and its file deleted), so a
 /// different candidate is chosen.
-pub fn fetch_audio(track: &Track, reject: bool) -> Result<Track> {
+///
+/// `ready` is called once enough has downloaded to start playing: the
+/// track's path then already plays while the rest arrives.
+pub fn fetch_audio(track: &Track, reject: bool, ready: &dyn Fn()) -> Result<Track> {
     let dir = audio_dir();
     std::fs::create_dir_all(dir)?;
     let id = track_id(&track.path).context("bad track path")?;
+    // A download left running (or finished) by an earlier session.
+    if !reject && let Some(file) = resume_stream(track, &id, ready) {
+        return finish_stream(&file, track, &id);
+    }
+    let get = |url: &str| download(url, track, &id, ready);
     // A YouTube Music result is its own source: no searching, nothing to
     // reject in favor of.
     if let Some(video) = id.strip_prefix("yt-") {
         if reject {
             bail!("this track is a specific YouTube video");
         }
-        let file = yt_dlp(&format!("https://www.youtube.com/watch?v={video}"), &dir.join(format!("{id}.dl.%(ext)s")))?;
-        return file_into_library(&file, track);
+        return get(&format!("https://www.youtube.com/watch?v={video}"));
     }
     let known = matches().lock().ok().and_then(|m| m.get(&id).cloned()).unwrap_or_default();
     // Already matched (an earlier fetch, or a radio pick): use that video.
     if !reject
         && let Some(video) = &known.source
-        && let Ok(file) = yt_dlp(&format!("https://www.youtube.com/watch?v={video}"), &dir.join(format!("{id}.dl.%(ext)s")))
+        && let Ok(t) = get(&format!("https://www.youtube.com/watch?v={video}"))
     {
-        return file_into_library(&file, track);
+        return Ok(t);
     }
     let query = format!("{} {}", track.track_artist, track.title);
     let mut candidates = search(
@@ -713,19 +720,204 @@ pub fn fetch_audio(track: &Track, reject: bool) -> Result<Track> {
         .collect();
     order.sort_by_key(|(s, _)| *s);
 
-    let template = dir.join(format!("{id}.dl.%(ext)s"));
     let mut last_err = String::new();
     for (_, c) in order.iter().take(3) {
         let url = format!("https://www.youtube.com/watch?v={}", c.id);
-        match yt_dlp(&url, &template) {
-            Ok(file) => {
+        match get(&url) {
+            Ok(t) => {
                 update_match(&id, |m| m.source = Some(c.id.clone()));
-                return file_into_library(&file, track);
+                return Ok(t);
             }
             Err(e) => last_err = e.to_string(),
         }
     }
     bail!("{last_err}")
+}
+
+/// Fetch one video: streamed, falling back to a plain download when there's
+/// no Opus stream to stream.
+fn download(url: &str, track: &Track, id: &str, ready: &dyn Fn()) -> Result<Track> {
+    let started = std::cell::Cell::new(false);
+    let ready_once = || {
+        started.set(true);
+        ready();
+    };
+    match stream(url, track, id, &ready_once) {
+        Ok(file) => finish_stream(&file, track, id),
+        // It was already playing: a second download wouldn't help.
+        Err(e) if started.get() => Err(e),
+        Err(_) => {
+            let file = yt_dlp(url, &audio_dir().join(format!("{id}.dl.%(ext)s")))?;
+            let t = file_into_library(&file, track)?;
+            ready();
+            Ok(t)
+        }
+    }
+}
+
+/// Where a track's audio is written while it streams in.
+fn stream_path(id: &str) -> PathBuf {
+    audio_dir().join(format!("{id}.stream.opus"))
+}
+
+/// For a file being streamed in, the markers the download leaves when it
+/// succeeds or fails; `None` for any other file.
+pub fn stream_marks(file: &Path) -> Option<[PathBuf; 2]> {
+    let name = file.file_name()?.to_str()?;
+    name.ends_with(".stream.opus").then(|| [file.with_extension("done"), file.with_extension("failed")])
+}
+
+/// Saved with each download, so a later session can finish it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Pending {
+    pid: u32,
+    track: Track,
+}
+
+fn pending_path(id: &str) -> PathBuf {
+    audio_dir().join(format!("{id}.pending.toml"))
+}
+
+/// Songs whose download an earlier session started and didn't file away.
+pub fn pending_downloads() -> Vec<Track> {
+    std::fs::read_dir(audio_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".pending.toml"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|s| toml::from_str::<Pending>(&s).ok())
+        .map(|p| p.track)
+        .collect()
+}
+
+/// Start streaming `url` into the track's stream file, in a process of its
+/// own so it finishes even if the app is closed. Returns the finished file.
+fn stream(url: &str, track: &Track, id: &str, ready: &dyn Fn()) -> Result<PathBuf> {
+    let file = stream_path(id);
+    let [done, failed] = stream_marks(&file).expect("stream path");
+    let log = file.with_extension("log");
+    for p in [&file, &done, &failed, &log] {
+        let _ = std::fs::remove_file(p);
+    }
+    use std::os::unix::process::CommandExt;
+    // yt-dlp hands the Opus stream to ffmpeg, which writes it out as Ogg a
+    // page at a time, the same file `yt-dlp -x` would have produced.
+    let script = r#"set -o pipefail
+yt-dlp --quiet --no-warnings --no-progress --no-playlist -f 'bestaudio[acodec=opus]' -o - "$1" 2>>"$3" \
+  | ffmpeg -nostdin -loglevel error -y -i pipe:0 -map 0:a -c:a copy -f ogg -flush_packets 1 -page_duration 200000 "$2" 2>>"$3" \
+  && touch "$4" || touch "$5""#;
+    let child = Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .arg("music-tui-fetch")
+        .args([url.as_ref(), file.as_os_str(), log.as_os_str(), done.as_os_str(), failed.as_os_str()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        // Its own process group: closing the terminal doesn't take it down.
+        .process_group(0)
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("starting the download: {e}"))?;
+    let pending = Pending { pid: child.id(), track: track.clone() };
+    if let Ok(body) = toml::to_string(&pending) {
+        let _ = std::fs::write(pending_path(id), body);
+    }
+    // The child is waited on through its markers; dropping it doesn't kill it.
+    drop(child);
+    follow_stream(track, id, ready)
+}
+
+/// Wait on a running download: link the track to it once a few seconds are
+/// in, then wait for it to finish.
+fn follow_stream(track: &Track, id: &str, ready: &dyn Fn()) -> Result<PathBuf> {
+    let file = stream_path(id);
+    let [done, failed] = stream_marks(&file).expect("stream path");
+    // About three seconds of audio.
+    const START: u64 = 48 * 1024;
+    let mut linked = false;
+    let started = Instant::now();
+    loop {
+        if failed.exists() {
+            let log = std::fs::read_to_string(file.with_extension("log")).unwrap_or_default();
+            let msg = log.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("download failed").trim().trim_start_matches("ERROR: ").to_string();
+            // Unlinked too, so the song can be fetched again.
+            if linked {
+                let _ = std::fs::remove_file(&track.path);
+            }
+            for p in [&file, &failed, &file.with_extension("log"), &pending_path(id)] {
+                let _ = std::fs::remove_file(p);
+            }
+            bail!("{msg}");
+        }
+        let finished = done.exists();
+        let size = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        if !linked && (finished || size >= START) {
+            link_track(&track.path, &file)?;
+            linked = true;
+            ready();
+        }
+        if finished {
+            return Ok(file);
+        }
+        // A download whose process is gone without a marker died with it.
+        if started.elapsed() > Duration::from_secs(2) && !download_alive(id) {
+            let _ = std::fs::write(&failed, "");
+            continue;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn download_alive(id: &str) -> bool {
+    std::fs::read_to_string(pending_path(id))
+        .ok()
+        .and_then(|s| toml::from_str::<Pending>(&s).ok())
+        .is_some_and(|p| Path::new(&format!("/proc/{}", p.pid)).exists())
+}
+
+/// An earlier session's download of this track, followed to the end if it
+/// is still running. `None` if there's nothing usable to pick up.
+fn resume_stream(track: &Track, id: &str, ready: &dyn Fn()) -> Option<PathBuf> {
+    let file = stream_path(id);
+    let [done, _] = stream_marks(&file)?;
+    if !pending_path(id).exists() || !file.exists() {
+        return None;
+    }
+    if done.exists() {
+        let _ = link_track(&track.path, &file);
+        ready();
+        return Some(file);
+    }
+    if download_alive(id) {
+        return follow_stream(track, id, ready).ok();
+    }
+    // Cut off: start over.
+    if std::fs::read_link(&track.path).is_ok_and(|l| l == file) {
+        let _ = std::fs::remove_file(&track.path);
+    }
+    let _ = std::fs::remove_file(&file);
+    None
+}
+
+/// File a finished stream into the library and clear its leftovers.
+fn finish_stream(file: &Path, track: &Track, id: &str) -> Result<Track> {
+    let t = file_into_library(file, track)?;
+    if let Some(marks) = stream_marks(file) {
+        for p in marks.iter().chain([&file.with_extension("log"), &pending_path(id)]) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    Ok(t)
+}
+
+/// Point the track's per-id path at `target`, replacing what was there.
+fn link_track(path: &Path, target: &Path) -> Result<()> {
+    let link = path.with_extension("link");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(target, &link)?;
+    std::fs::rename(&link, path)?;
+    Ok(())
 }
 
 /// Run yt-dlp on one video, returning the downloaded file's path.
@@ -886,8 +1078,13 @@ pub fn library_path(t: &Track) -> PathBuf {
 /// file is complete and tagged.
 fn file_into_library(file: &Path, track: &Track) -> Result<Track> {
     let mut t = enrich(track);
-    let _ = tag_file(file, &t, cover_bytes(&track.path));
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("m4a").to_string();
+    // Tagged as a copy: the original may be playing right now, and tagging
+    // rewrites the file under the player.
+    let id = track_id(&track.path).unwrap_or_default();
+    let tagged = audio_dir().join(format!("{id}.tagging.{ext}"));
+    std::fs::copy(file, &tagged)?;
+    let _ = tag_file(&tagged, &t, cover_bytes(&track.path));
     let mut dest = library_path(&t).with_extension(&ext);
     // A file already there that isn't this track's own (re-filed) copy is a
     // different track with the same name.
@@ -901,11 +1098,9 @@ fn file_into_library(file: &Path, track: &Track) -> Result<Track> {
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::rename(file, &dest)?;
-    let link = track.path.with_extension("link");
-    let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(&dest, &link)?;
-    std::fs::rename(&link, &track.path)?;
+    std::fs::rename(&tagged, &dest)?;
+    link_track(&track.path, &dest)?;
+    let _ = std::fs::remove_file(file);
     t.length_secs = scan::read_length(&dest).unwrap_or(t.length_secs);
     Ok(t)
 }
@@ -1340,3 +1535,4 @@ mod tests {
         assert!(audio < other && other < mv);
     }
 }
+

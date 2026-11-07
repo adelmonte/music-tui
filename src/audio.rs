@@ -189,6 +189,11 @@ impl Audio {
         self.duration
     }
 
+    /// The real length, once a track that started streaming has finished.
+    pub fn set_duration(&mut self, secs: u64) {
+        self.duration = Duration::from_secs(secs);
+    }
+
     pub fn volume(&self) -> f32 {
         self.master_volume
     }

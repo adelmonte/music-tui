@@ -3,13 +3,19 @@
 //! packet lengths from the start (cheap: no decoding) and decodes the last
 //! 80 ms before the target to let the decoder converge, as the Opus spec
 //! recommends.
+//!
+//! A song still downloading (see `spotify::stream_path`) is read as it grows:
+//! only whole Ogg pages are exposed, and when playback catches up with the
+//! download it plays silence until more arrives.
 
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::num::NonZero;
-use std::path::Path;
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use ogg::PacketReader;
@@ -27,9 +33,113 @@ pub fn is_ogg(path: &Path) -> bool {
     File::open(path).and_then(|mut f| f.read_exact(&mut magic)).is_ok() && &magic == b"OggS"
 }
 
+/// A file that may still be being written. Reads stop at the end of the
+/// last complete Ogg page until the download is marked finished.
+struct Growing {
+    file: File,
+    pos: u64,
+    /// Bytes safe to read.
+    safe: u64,
+    /// Markers whose appearance means the writer is done.
+    marks: Option<[PathBuf; 2]>,
+    live: Arc<AtomicBool>,
+    checked: Option<Instant>,
+}
+
+impl Growing {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        let file = File::open(path)?;
+        let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let marks = crate::spotify::stream_marks(&real).filter(|m| !m.iter().any(|p| p.exists()));
+        let len = file.metadata()?.len();
+        let mut g = Self { file, pos: 0, safe: len, live: Arc::new(AtomicBool::new(marks.is_some())), marks, checked: None };
+        if g.marks.is_some() {
+            g.safe = 0;
+            g.refresh();
+        }
+        Ok(g)
+    }
+
+    /// Move `safe` up to the newest complete page (at most every 50 ms).
+    fn refresh(&mut self) {
+        let Some(marks) = &self.marks else { return };
+        if self.checked.is_some_and(|c| c.elapsed() < Duration::from_millis(50)) {
+            return;
+        }
+        self.checked = Some(Instant::now());
+        // Checked before the length, so a finished file is read whole.
+        let finished = marks.iter().any(|p| p.exists());
+        let len = self.file.metadata().map(|m| m.len()).unwrap_or(0);
+        if finished {
+            self.safe = len;
+            self.marks = None;
+            self.live.store(false, Ordering::Relaxed);
+            return;
+        }
+        let mut head = [0u8; 27];
+        let mut segs = [0u8; 255];
+        loop {
+            let at = self.safe;
+            if self.file.read_exact_at(&mut head, at).is_err() || &head[..4] != b"OggS" {
+                break;
+            }
+            let n = head[26] as usize;
+            if self.file.read_exact_at(&mut segs[..n], at + 27).is_err() {
+                break;
+            }
+            let size = 27 + n as u64 + segs[..n].iter().map(|&b| b as u64).sum::<u64>();
+            if at + size > len {
+                break;
+            }
+            self.safe = at + size;
+        }
+    }
+}
+
+impl Read for Growing {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos >= self.safe {
+            self.refresh();
+        }
+        let n = (self.safe.saturating_sub(self.pos) as usize).min(buf.len());
+        if n == 0 {
+            return Ok(0);
+        }
+        let n = self.file.read_at(&mut buf[..n], self.pos)?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for Growing {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        let base = match to {
+            SeekFrom::Start(n) => n as i64,
+            SeekFrom::Current(d) => self.pos as i64 + d,
+            SeekFrom::End(d) => self.safe as i64 + d,
+        };
+        self.pos = base.max(0) as u64;
+        Ok(self.pos)
+    }
+}
+
+enum Fill {
+    Data,
+    /// Caught up with a download in progress.
+    Wait,
+    End,
+}
+
+/// Samples of silence to play before checking a download again (~20 ms).
+const WAIT: usize = 960;
+
 pub struct OpusSource {
-    path: std::path::PathBuf,
-    reader: PacketReader<BufReader<File>>,
+    path: PathBuf,
+    reader: PacketReader<BufReader<Growing>>,
+    /// Still downloading.
+    live: Arc<AtomicBool>,
+    /// Silent samples left before trying the download again.
+    wait: usize,
     decoder: opus::Decoder,
     channels: u16,
     pre_skip: u64,
@@ -46,8 +156,10 @@ pub struct OpusSource {
 
 impl OpusSource {
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let total_granule = last_granule(&file).unwrap_or(0);
+        let file = Growing::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let live = file.live.clone();
+        // A download's length isn't known until it's done; it plays to the end.
+        let total_granule = if live.load(Ordering::Relaxed) { 0 } else { last_granule(&file.file).unwrap_or(0) };
         let mut reader = PacketReader::new(BufReader::new(file));
         let head = reader.read_packet()?.context("empty Ogg file")?.data;
         if head.len() < 19 || &head[..8] != b"OpusHead" {
@@ -66,6 +178,8 @@ impl OpusSource {
         Ok(Self {
             path: path.to_path_buf(),
             reader,
+            live,
+            wait: 0,
             decoder: opus::Decoder::new(RATE, layout)?,
             channels,
             pre_skip,
@@ -78,11 +192,13 @@ impl OpusSource {
         })
     }
 
-    /// Decode the next packet into `buf`. False at the end of the stream.
-    fn refill(&mut self) -> bool {
+    /// Decode the next packet into `buf`.
+    fn refill(&mut self) -> Fill {
         let mut out = vec![0f32; MAX_FRAME * self.channels as usize];
         loop {
-            let Ok(Some(packet)) = self.reader.read_packet() else { return false };
+            let Ok(Some(packet)) = self.reader.read_packet() else {
+                return if self.live.load(Ordering::Relaxed) { Fill::Wait } else { Fill::End };
+            };
             let Ok(n) = self.decoder.decode_float(&packet.data, &mut out, false) else { continue };
             let skip = (self.discard as usize).min(n);
             self.discard -= skip as u64;
@@ -93,7 +209,7 @@ impl OpusSource {
             self.buf.clear();
             self.buf.extend(out[skip * ch..n * ch].iter().map(|s| s * self.gain));
             self.at = 0;
-            return true;
+            return Fill::Data;
         }
     }
 }
@@ -121,8 +237,17 @@ impl Iterator for OpusSource {
             if self.total > 0 && self.pos >= self.total {
                 return None;
             }
-            if !self.refill() {
-                return None;
+            if self.wait > 0 {
+                self.wait -= 1;
+                return Some(0.0);
+            }
+            match self.refill() {
+                Fill::Data => {}
+                Fill::End => return None,
+                Fill::Wait => {
+                    self.wait = WAIT * self.channels as usize;
+                    return Some(0.0);
+                }
             }
         }
         let s = self.buf[self.at];
@@ -159,7 +284,11 @@ impl Source for OpusSource {
         }
         // Absolute sample (pre-skip included) to start decoding from.
         let goal = (target + self.pre_skip).saturating_sub(PREROLL);
-        let file = File::open(&self.path).map_err(err)?;
+        // Reopened by path: a finished download has been filed into the
+        // library by now, and the link points there.
+        let file = Growing::open(&self.path).map_err(err)?;
+        self.live = file.live.clone();
+        self.wait = 0;
         let mut reader = PacketReader::new(BufReader::new(file));
         let mut packets = 0;
         let mut at = 0u64;
@@ -196,3 +325,4 @@ impl Source for OpusSource {
         Ok(())
     }
 }
+

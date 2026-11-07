@@ -398,7 +398,8 @@ pub struct AddMenu {
 /// the track with its metadata filled in, or an error message.
 struct FetchMsg {
     path: PathBuf,
-    result: Result<Track, String>,
+    /// `Ok(None)`: enough has downloaded to start playing; the rest follows.
+    result: Result<Option<Track>, String>,
 }
 
 /// Layout rectangles recorded each frame so the input layer can hit-test mouse
@@ -778,6 +779,11 @@ impl App {
         prune_legacy_art_cache();
         if app.cache_all_art {
             app.start_art_precache();
+        }
+        // Downloads an earlier session left unfinished (they may still be
+        // running): see them through, so the songs end up in the library.
+        for track in spotify::pending_downloads() {
+            app.request_fetch(&track, false);
         }
         app.restore_session();
         if !key_problems.is_empty() {
@@ -1573,7 +1579,7 @@ impl App {
             let known: HashSet<PathBuf> = fetched.iter().map(|t| t.path.clone()).collect();
             fetched.extend(spotify::orphan_files(&known));
             for t in spotify::organize_fetched(fetched) {
-                let _ = tx.send(FetchMsg { path: t.path.clone(), result: Ok(t) });
+                let _ = tx.send(FetchMsg { path: t.path.clone(), result: Ok(Some(t)) });
             }
         });
         self.refresh_links();
@@ -3131,7 +3137,10 @@ impl App {
         let tx = self.fetch_tx.clone();
         let track = track.clone();
         std::thread::spawn(move || {
-            let result = spotify::fetch_audio(&track, reject).map_err(|e| e.to_string());
+            let ready = || {
+                let _ = tx.send(FetchMsg { path: track.path.clone(), result: Ok(None) });
+            };
+            let result = spotify::fetch_audio(&track, reject, &ready).map(Some).map_err(|e| e.to_string());
             let _ = tx.send(FetchMsg { path: track.path, result });
         });
     }
@@ -3157,10 +3166,24 @@ impl App {
         let mut store_dirty = false;
         while let Ok(msg) = self.fetch_rx.try_recv() {
             changed = true;
-            self.fetching.remove(&msg.path);
             let waiting = self.pending_play.as_ref() == Some(&msg.path);
+            if let Ok(None) = msg.result {
+                // Streaming: start it now; the download carries on.
+                if waiting
+                    && let Some(i) = self.now
+                    && self.queue.get(i).is_some_and(|t| t.path == msg.path)
+                {
+                    self.play_index(i);
+                }
+                continue;
+            }
+            self.fetching.remove(&msg.path);
             match msg.result {
-                Ok(got) => {
+                Ok(None) => {}
+                Ok(Some(got)) => {
+                    if self.audio.current_path() == Some(msg.path.as_path()) && got.length_secs > 0 {
+                        self.audio.set_duration(got.length_secs);
+                    }
                     let lists = self
                         .spotify_lists
                         .iter_mut()
@@ -3191,7 +3214,7 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    if waiting {
+                    if waiting || self.audio.current_path() == Some(msg.path.as_path()) {
                         self.pending_play = None;
                         let title = self
                             .queue
