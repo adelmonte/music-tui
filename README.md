@@ -259,6 +259,8 @@ selection_fg = "black"
 border = "darkgray"
 dim = "darkgray"
 muted = "gray"
+menu_bg = "#2e3440"       # right-click menu background
+menu_highlight = "#81a1c1"
 
 [layout]
 columns = [25, 30, 45]  # browser column widths (%), kept in sync with on-screen resizing

@@ -1590,7 +1590,9 @@ impl App {
 
     fn import_export(&mut self) {
         match spotify::import(&self.config.spotify.csv) {
-            Ok(lists) => {
+            Ok(mut lists) => {
+                let deleted = spotify::deleted_lists();
+                lists.retain(|l| !deleted.contains(&l.name));
                 self.spotify_error = None;
                 let added = spotify::merge_import(&mut self.sp_store, lists);
                 if added > 0 {
@@ -1902,6 +1904,12 @@ impl App {
                 "It stops refreshing and leaves the sidebar. You can link it again with u.".to_string(),
                 "Unlink",
             ),
+            (PlPane::List, false) if list.name != spotify::LIKED => (
+                " Delete playlist? ",
+                format!("{}  ({} songs)", list.name, list.tracks.len()),
+                "Re-importing the export won't bring it back. Downloaded songs stay.".to_string(),
+                "Delete",
+            ),
             (PlPane::Tracks, false) => {
                 let Some(t) = self.sp_target_track() else { return };
                 (" Remove song? ", format!("{} — {}", t.title, t.track_artist), format!("From '{}'.", list.name), "Remove")
@@ -1925,7 +1933,20 @@ impl App {
                     self.notify(format!("Unlinked '{name}'."));
                 }
             }
-            (PlPane::List, None) => self.notify("Only linked (↻) lists can be removed."),
+            (PlPane::List, None) if list.name == spotify::LIKED => self.notify("Liked Songs can't be deleted."),
+            (PlPane::List, None) => {
+                self.sp_store.retain(|p| p.name != list.name);
+                spotify::save_store(&self.sp_store);
+                let mut deleted = spotify::deleted_lists();
+                if !deleted.contains(&list.name) {
+                    deleted.push(list.name.clone());
+                    spotify::set_deleted_lists(&deleted);
+                }
+                self.rebuild_streaming();
+                self.sp_list_state.select(Some(self.sp_list_state.selected().unwrap_or(0).min(self.sp_view.len().saturating_sub(1))));
+                self.sp_move(0);
+                self.notify(format!("Deleted '{}'.", list.name));
+            }
             (PlPane::Queue, _) => self.remove_from_queue(),
             (PlPane::Tracks, Some(_)) => self.notify("Linked lists are read-only."),
             (PlPane::Tracks, None) => {

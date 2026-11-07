@@ -311,6 +311,23 @@ pub fn load_store() -> Vec<Playlist> {
         .unwrap_or_default()
 }
 
+fn deleted_path() -> PathBuf {
+    config::streaming_store_path().with_file_name("deleted-lists.txt")
+}
+
+/// Names of exported playlists the user deleted, which re-imports skip.
+pub fn deleted_lists() -> Vec<String> {
+    std::fs::read_to_string(deleted_path())
+        .map(|s| s.lines().map(str::to_string).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+pub fn set_deleted_lists(names: &[String]) {
+    let path = deleted_path();
+    let _ = config::ensure_parent(&path);
+    let _ = std::fs::write(path, names.join("\n") + "\n");
+}
+
 pub fn save_store(lists: &[Playlist]) {
     let path = config::streaming_store_path();
     let _ = config::ensure_parent(&path);

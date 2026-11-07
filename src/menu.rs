@@ -3,9 +3,9 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::app::{AddTarget, GotoKind, SpSort};
 use crate::config::Theme;
@@ -202,118 +202,54 @@ pub fn draw(f: &mut Frame, menu: &mut Menu, theme: &Theme) {
         let items = menu.items[menu.sel].submenu.clone();
         let (w, h) = size(None, &items);
         let item_y = menu.rect.y + 1 + u16::from(menu.title.is_some()) + menu.sel as u16;
-        // The submenu shares the menu's edge, so the two frames join.
-        let right = menu.rect.right().saturating_sub(1);
-        let mut r = place((right, item_y.saturating_sub(1)), w, h, area);
-        if r.x < right {
+        let mut r = place((menu.rect.right(), item_y.saturating_sub(1)), w, h, area);
+        if r.x < menu.rect.right() {
             // No room on the right: open to the left.
-            r.x = (menu.rect.x + 1).saturating_sub(r.width);
+            r.x = menu.rect.x.saturating_sub(r.width);
         }
         menu.sub_rect = r;
         draw_list(f, r, None, &items, Some(s), true, theme);
-        join_frames(f, menu.rect, r, menu.title.is_some(), &menu.items, theme);
     } else {
         menu.sub_rect = Rect::default();
     }
 }
 
-/// Where the submenu's frame overlaps the menu's, draw the shared column
-/// with the junction each row needs.
-fn join_frames(f: &mut Frame, menu: Rect, sub: Rect, title: bool, items: &[MenuItem], t: &Theme) {
-    let x = if sub.x + 1 == menu.right() { sub.x } else if sub.right() == menu.x + 1 { menu.x } else { return };
-    let top = menu.y.min(sub.y);
-    let bottom = menu.bottom().max(sub.bottom()) - 1;
-    let first = menu.y + 1 + u16::from(title);
-    let menu_rule = |y: u16| {
-        y == menu.y || y == menu.bottom() - 1 || y.checked_sub(first).and_then(|i| items.get(i as usize)).is_some_and(|i| i.separator)
-    };
-    let sub_rule = |y: u16| y == sub.y || y == sub.bottom() - 1;
-    // Which side each row's horizontal line comes from.
-    let (menu_side, sub_side) = if x == sub.x { (true, false) } else { (false, true) };
-    let buf = f.buffer_mut();
-    for y in top..=bottom {
-        let in_menu = y >= menu.y && y < menu.bottom();
-        let in_sub = y >= sub.y && y < sub.bottom();
-        if !in_menu && !in_sub {
-            continue;
-        }
-        let up = y > top && (in_menu && y > menu.y || in_sub && y > sub.y);
-        let down = y < bottom && (in_menu && y < menu.bottom() - 1 || in_sub && y < sub.bottom() - 1);
-        let mut left = false;
-        let mut right = false;
-        if in_menu && menu_rule(y) {
-            if menu_side { left = true } else { right = true }
-        }
-        if in_sub && sub_rule(y) {
-            if sub_side { left = true } else { right = true }
-        }
-        let glyph = match (up, down, left, right) {
-            (true, true, true, true) => "┼",
-            (true, true, true, false) => "┤",
-            (true, true, false, true) => "├",
-            (false, true, true, true) => "┬",
-            (true, false, true, true) => "┴",
-            (false, true, false, true) => "╭",
-            (false, true, true, false) => "╮",
-            (true, false, false, true) => "╰",
-            (true, false, true, false) => "╯",
-            _ => "│",
-        };
-        buf[(x, y)].set_symbol(glyph).set_style(Style::default().fg(t.accent));
-    }
-}
-
+/// A filled panel with no frame: a blank cell of padding all round.
 fn draw_list(f: &mut Frame, rect: Rect, title: Option<&str>, items: &[MenuItem], sel: Option<usize>, active: bool, t: &Theme) {
+    let bg = Style::default().bg(t.menu_bg);
     f.render_widget(Clear, rect);
-    let inner = rect.width.saturating_sub(2) as usize;
+    f.render_widget(Block::default().style(bg), rect);
+    let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width.saturating_sub(2), rect.height.saturating_sub(2));
+    let w = inner.width as usize;
     let mut lines = Vec::new();
     if let Some(title) = title {
-        let title: String = title.chars().take(inner.saturating_sub(2)).collect();
-        lines.push(Line::from(Span::styled(format!(" {title}"), Style::default().fg(t.muted).add_modifier(Modifier::ITALIC))));
+        let title: String = title.chars().take(w.saturating_sub(2)).collect();
+        lines.push(Line::from(Span::styled(format!(" {title}"), bg.fg(t.muted).add_modifier(Modifier::ITALIC))));
     }
     for (i, item) in items.iter().enumerate() {
         if item.separator {
-            lines.push(Line::from(Span::styled("─".repeat(inner), Style::default().fg(t.border))));
+            lines.push(Line::from(Span::styled("─".repeat(w), bg.fg(t.border))));
             continue;
         }
         let arrow = if item.submenu.is_empty() { "" } else { " ▸" };
         let left = format!(" {}{arrow}", item.label);
         let right = if item.key.is_empty() { String::new() } else { format!("{} ", item.key) };
-        let pad = inner.saturating_sub(left.chars().count() + right.chars().count());
+        let pad = w.saturating_sub(left.chars().count() + right.chars().count());
         let lit = sel == Some(i);
         let base = if lit && active {
-            Style::default().fg(t.selection_fg).bg(t.accent).add_modifier(Modifier::BOLD)
+            bg.bg(t.menu_highlight).fg(Color::White).add_modifier(Modifier::BOLD)
         } else if lit {
-            Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+            bg.fg(t.accent).add_modifier(Modifier::BOLD)
         } else {
-            Style::default()
+            bg
         };
-        let key_style = if lit && active { base } else { Style::default().fg(t.muted) };
+        let key_style = if lit && active { base } else { bg.fg(t.muted) };
         lines.push(Line::from(vec![
             Span::styled(left, base),
             Span::styled(" ".repeat(pad), base),
             Span::styled(right, key_style),
         ]));
     }
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(t.accent));
-    f.render_widget(Paragraph::new(lines).block(block), rect);
-    // Dividers meet the frame: ├────┤.
-    let first = rect.y + 1 + u16::from(title.is_some());
-    let buf = f.buffer_mut();
-    for (i, item) in items.iter().enumerate() {
-        let y = first + i as u16;
-        if !item.separator || y + 1 >= rect.bottom() {
-            continue;
-        }
-        let style = Style::default().fg(t.accent);
-        for x in rect.x + 1..rect.right().saturating_sub(1) {
-            buf[(x, y)].set_symbol("─").set_style(Style::default().fg(t.border));
-        }
-        buf[(rect.x, y)].set_symbol("├").set_style(style);
-        buf[(rect.right() - 1, y)].set_symbol("┤").set_style(style);
-    }
+    f.render_widget(Paragraph::new(lines).style(bg), inner);
 }
 

@@ -281,8 +281,19 @@ pub struct ThemeConfig {
     pub dim: String,
     #[serde(default = "d_muted")]
     pub muted: String,
+    /// The right-click menu's background and highlight.
+    #[serde(default = "d_menu_bg")]
+    pub menu_bg: String,
+    #[serde(default = "d_menu_highlight")]
+    pub menu_highlight: String,
 }
 
+fn d_menu_bg() -> String {
+    "#2e3440".into()
+}
+fn d_menu_highlight() -> String {
+    "#81a1c1".into()
+}
 fn d_accent() -> String {
     "cyan".into()
 }
@@ -307,6 +318,8 @@ impl Default for ThemeConfig {
             border: d_border(),
             dim: d_dim(),
             muted: d_muted(),
+            menu_bg: d_menu_bg(),
+            menu_highlight: d_menu_highlight(),
         }
     }
 }
@@ -319,6 +332,8 @@ pub struct Theme {
     pub border: Color,
     pub dim: Color,
     pub muted: Color,
+    pub menu_bg: Color,
+    pub menu_highlight: Color,
 }
 
 impl ThemeConfig {
@@ -329,6 +344,8 @@ impl ThemeConfig {
             border: parse_color(&self.border, Color::DarkGray),
             dim: parse_color(&self.dim, Color::DarkGray),
             muted: parse_color(&self.muted, Color::Gray),
+            menu_bg: parse_color(&self.menu_bg, Color::Rgb(46, 52, 64)),
+            menu_highlight: parse_color(&self.menu_highlight, Color::Rgb(129, 161, 193)),
         }
     }
 }

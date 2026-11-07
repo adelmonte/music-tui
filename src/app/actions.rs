@@ -356,6 +356,9 @@ impl App {
                     if linked {
                         v.push(MenuItem::sep());
                         v.push(act("Unlink playlist", Action::Remove));
+                    } else if list.name != spotify::LIKED {
+                        v.push(MenuItem::sep());
+                        v.push(act("Delete playlist", Action::Remove));
                     }
                     return (Some(list.name.clone()), v);
                 }
