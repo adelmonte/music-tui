@@ -90,8 +90,8 @@ Everything works with the mouse:
 - Click tabs and the playback buttons; drag the progress bar, the volume, the scrollbars
   and the pane dividers.
 
-Press `?` (or click **? keys** in the top-right) to show the keys on screen, drawn on the
-controls themselves and in a row for the focused pane. `F1` lists every shortcut.
+Press `?` (or click **? keys** in the top-right) to show the keys for the focused pane in
+a row at the bottom, and each tab's key. `F1` lists every shortcut.
 
 | Key | Action |
 | --- | --- |

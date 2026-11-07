@@ -72,65 +72,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.show_art_popup {
         draw_art_popup(f, app);
     }
-    if app.show_keys {
-        draw_key_badges(f, app);
-    }
     let theme = app.theme;
     if let Some(menu) = &mut app.menu {
         crate::menu::draw(f, menu, &theme);
     }
 }
 
-/// With `?` on: each control's key, drawn on the control itself.
-fn draw_key_badges(f: &mut Frame, app: &App) {
-    let t = app.theme;
-    let r = &app.rects;
-    let km = &app.keymap;
-    let area = f.area();
-    let mut put = |x: u16, y: u16, action: Action| {
-        let key = km.label(action);
-        if key.is_empty() {
-            return;
-        }
-        let w = key.chars().count() as u16 + 2;
-        if y >= area.bottom() || x + w > area.right() {
-            return;
-        }
-        f.render_widget(Paragraph::new(Line::from(chip(&key, &t))), Rect::new(x, y, w, 1));
-    };
-    let buttons = [
-        (r.btn_shuffle, Action::Shuffle),
-        (r.btn_prev, Action::Prev),
-        (r.btn_play, Action::PlayPause),
-        (r.btn_next, Action::Next),
-        (r.btn_repeat, Action::Repeat),
-    ];
-    for (rect, action) in buttons {
-        if rect.width > 0 {
-            put(rect.x, rect.y.saturating_sub(1), action);
-        }
-    }
-    if r.search.width > 0 {
-        put(r.search.x + 2, r.search.y, Action::Search);
-    }
-    if r.seekbar.width > 0 {
-        put(r.seekbar.x + 1, r.seekbar.y.saturating_sub(1), Action::SeekBack);
-        put(r.seekbar.x + 5, r.seekbar.y.saturating_sub(1), Action::SeekForward);
-    }
-    if r.volume.width > 0 {
-        put(r.volume.x, r.volume.y.saturating_sub(1), Action::VolumeUp);
-        put(r.volume.x, r.volume.bottom(), Action::VolumeDown);
-    }
-    if r.art.width > 0 {
-        put(r.art.x, r.art.y, Action::Art);
-    }
-    if r.queue.width > 0 {
-        put(r.queue.right().saturating_sub(6), r.queue.y.saturating_sub(1), Action::ToggleQueue);
-    }
-    if app.tab == Tab::Streaming && r.sp_tracks.width > 0 {
-        put(r.sp_tracks.right().saturating_sub(6), r.sp_tracks.y.saturating_sub(1), Action::Sort);
-    }
-}
 
 /// A large, centered album-art overlay. The cover is square, so the inner region
 /// is made square *in pixels* from the terminal's actual cell size (cells are
@@ -297,8 +244,7 @@ fn draw_hints(f: &mut Frame, app: &mut App, area: Rect) {
     let t = app.theme;
     let mut all: Vec<(String, Action, &str)> =
         hints(app).into_iter().map(|(a, d)| (app.keymap.label(a), a, d)).filter(|h| !h.0.is_empty()).collect();
-    let right = Span::styled("right-click for more  ", Style::default().fg(t.muted));
-    let room = area.width.saturating_sub(right.content.chars().count() as u16 + 1);
+    let room = area.width;
     let width = |h: &(String, Action, &str)| (h.0.chars().count() + h.2.chars().count() + 4) as u16;
     // Drop hints from the end until they fit.
     while !all.is_empty() && all.iter().map(width).sum::<u16>() + 1 > room {
@@ -315,7 +261,6 @@ fn draw_hints(f: &mut Frame, app: &mut App, area: Rect) {
         x += w;
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
-    f.render_widget(Paragraph::new(Line::from(right)).alignment(Alignment::Right), area);
 }
 
 fn draw_goto_menu(f: &mut Frame, app: &mut App, area: Rect) {
