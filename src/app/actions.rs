@@ -352,7 +352,6 @@ impl App {
                         MenuItem::sep(),
                         self.sort_submenu(),
                         act("Link a playlist…", Action::LinkPlaylist),
-                        act("Re-read the export", Action::Reimport),
                     ];
                     if linked {
                         v.push(MenuItem::sep());

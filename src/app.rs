@@ -442,6 +442,9 @@ pub struct Rects {
     pub btn_play: Rect,
     pub btn_next: Rect,
     pub btn_repeat: Rect,
+    /// The confirmation dialog's buttons.
+    pub confirm_yes: Rect,
+    pub confirm_no: Rect,
 }
 
 pub struct App {

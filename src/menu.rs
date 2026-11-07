@@ -202,15 +202,64 @@ pub fn draw(f: &mut Frame, menu: &mut Menu, theme: &Theme) {
         let items = menu.items[menu.sel].submenu.clone();
         let (w, h) = size(None, &items);
         let item_y = menu.rect.y + 1 + u16::from(menu.title.is_some()) + menu.sel as u16;
-        let mut r = place((menu.rect.right(), item_y.saturating_sub(1)), w, h, area);
-        if r.x < menu.rect.right() {
+        // The submenu shares the menu's edge, so the two frames join.
+        let right = menu.rect.right().saturating_sub(1);
+        let mut r = place((right, item_y.saturating_sub(1)), w, h, area);
+        if r.x < right {
             // No room on the right: open to the left.
-            r.x = menu.rect.x.saturating_sub(r.width);
+            r.x = (menu.rect.x + 1).saturating_sub(r.width);
         }
         menu.sub_rect = r;
         draw_list(f, r, None, &items, Some(s), true, theme);
+        join_frames(f, menu.rect, r, menu.title.is_some(), &menu.items, theme);
     } else {
         menu.sub_rect = Rect::default();
+    }
+}
+
+/// Where the submenu's frame overlaps the menu's, draw the shared column
+/// with the junction each row needs.
+fn join_frames(f: &mut Frame, menu: Rect, sub: Rect, title: bool, items: &[MenuItem], t: &Theme) {
+    let x = if sub.x + 1 == menu.right() { sub.x } else if sub.right() == menu.x + 1 { menu.x } else { return };
+    let top = menu.y.min(sub.y);
+    let bottom = menu.bottom().max(sub.bottom()) - 1;
+    let first = menu.y + 1 + u16::from(title);
+    let menu_rule = |y: u16| {
+        y == menu.y || y == menu.bottom() - 1 || y.checked_sub(first).and_then(|i| items.get(i as usize)).is_some_and(|i| i.separator)
+    };
+    let sub_rule = |y: u16| y == sub.y || y == sub.bottom() - 1;
+    // Which side each row's horizontal line comes from.
+    let (menu_side, sub_side) = if x == sub.x { (true, false) } else { (false, true) };
+    let buf = f.buffer_mut();
+    for y in top..=bottom {
+        let in_menu = y >= menu.y && y < menu.bottom();
+        let in_sub = y >= sub.y && y < sub.bottom();
+        if !in_menu && !in_sub {
+            continue;
+        }
+        let up = y > top && (in_menu && y > menu.y || in_sub && y > sub.y);
+        let down = y < bottom && (in_menu && y < menu.bottom() - 1 || in_sub && y < sub.bottom() - 1);
+        let mut left = false;
+        let mut right = false;
+        if in_menu && menu_rule(y) {
+            if menu_side { left = true } else { right = true }
+        }
+        if in_sub && sub_rule(y) {
+            if sub_side { left = true } else { right = true }
+        }
+        let glyph = match (up, down, left, right) {
+            (true, true, true, true) => "┼",
+            (true, true, true, false) => "┤",
+            (true, true, false, true) => "├",
+            (false, true, true, true) => "┬",
+            (true, false, true, true) => "┴",
+            (false, true, false, true) => "╭",
+            (false, true, true, false) => "╮",
+            (true, false, false, true) => "╰",
+            (true, false, true, false) => "╯",
+            _ => "│",
+        };
+        buf[(x, y)].set_symbol(glyph).set_style(Style::default().fg(t.accent));
     }
 }
 
@@ -251,4 +300,20 @@ fn draw_list(f: &mut Frame, rect: Rect, title: Option<&str>, items: &[MenuItem],
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(t.accent));
     f.render_widget(Paragraph::new(lines).block(block), rect);
+    // Dividers meet the frame: ├────┤.
+    let first = rect.y + 1 + u16::from(title.is_some());
+    let buf = f.buffer_mut();
+    for (i, item) in items.iter().enumerate() {
+        let y = first + i as u16;
+        if !item.separator || y + 1 >= rect.bottom() {
+            continue;
+        }
+        let style = Style::default().fg(t.accent);
+        for x in rect.x + 1..rect.right().saturating_sub(1) {
+            buf[(x, y)].set_symbol("─").set_style(Style::default().fg(t.border));
+        }
+        buf[(rect.x, y)].set_symbol("├").set_style(style);
+        buf[(rect.right() - 1, y)].set_symbol("┤").set_style(style);
+    }
 }
+

@@ -506,8 +506,14 @@ fn handle_click(app: &mut App, x: u16, y: u16) {
         app.show_art_popup = false;
         return;
     }
+    // A confirmation answers to its buttons; any other click cancels it.
+    if app.confirm.is_some() {
+        let yes = hit(app.rects.confirm_yes, x, y);
+        app.confirm_answer(yes);
+        return;
+    }
     // A click while a popup is open just closes it.
-    if app.goto_menu.take().is_some() || app.confirm.take().is_some() {
+    if app.goto_menu.take().is_some() {
         return;
     }
     // A fresh click ends any prior drag grab.

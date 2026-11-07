@@ -198,7 +198,6 @@ To keep songs, copy their folders into your music directory (Settings → Downlo
 | `g` | Go to… song radio, artist page, or album page (in Explore) |
 | `x` | wrong song? Confirms, then fetches the next-best YouTube match |
 | `Tab` | switch between the lists and the songs |
-| `R` | re-import the CSV export |
 | `/` | search the open list |
 
 ### Explore

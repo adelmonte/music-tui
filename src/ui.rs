@@ -363,6 +363,12 @@ fn draw_confirm(f: &mut Frame, app: &mut App, area: Rect) {
         Line::from(""),
         Line::from(vec![chip("y"), Span::raw(format!(" {}    ", c.yes)), chip("n"), Span::raw(format!(" {}", c.no))]),
     ]);
+    // Both buttons are clickable.
+    let row = popup.y + 4;
+    let yes_w = c.yes.chars().count() as u16 + 4;
+    let no_w = c.no.chars().count() as u16 + 4;
+    app.rects.confirm_yes = Rect::new(popup.x + 1, row, yes_w, 1);
+    app.rects.confirm_no = Rect::new(popup.x + 1 + yes_w + 3, row, no_w, 1);
     let block = Block::bordered().border_type(BorderType::Rounded).title(c.title).border_style(Style::default().fg(t.accent));
     f.render_widget(Paragraph::new(text).block(block), popup);
 }
@@ -373,9 +379,9 @@ fn draw_search(f: &mut Frame, app: &mut App, area: Rect) {
     // The box title and the placeholder share one style so they read as a
     // pair; the placeholder says what's searched.
     let hint = match app.tab {
-        Tab::Browser => "Search all music (Deezer · YouTube Music) — click or press /",
-        Tab::Streaming => "Search your Spotify library and playlists — click or press /",
-        _ => "Search title / artist / album — click or press /",
+        Tab::Browser => "all music, from Deezer and YouTube Music",
+        Tab::Streaming => "your Spotify library and playlists",
+        _ => "titles, artists and albums",
     };
     let block = titled(" Search ", focused, t);
     let inner = block.inner(area);

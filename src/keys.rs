@@ -117,7 +117,7 @@ pub const ACTIONS: &[(&str, Action, &[&str], &str, &str)] = &[
     ("sort", Action::Sort, &["o"], "Songs", "Change the sort"),
     ("save_list", Action::SaveList, &["S"], "Songs", "Save as a playlist"),
     ("link_playlist", Action::LinkPlaylist, &["u"], "Songs", "Link a Spotify playlist"),
-    ("reimport", Action::Reimport, &["R"], "Songs", "Re-read the Spotify export"),
+    ("reimport", Action::Reimport, &[], "Songs", "Re-read the Spotify export"),
     ("toggle_queue", Action::ToggleQueue, &["Q"], "Queue", "Show / hide the queue"),
     ("clear_queue", Action::ClearQueue, &["c"], "Queue", "Clear the queue"),
     ("move_up", Action::MoveUp, &["Shift+Up"], "Queue", "Move the song up"),
