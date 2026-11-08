@@ -217,13 +217,21 @@ fn local_match<'a>(library: &'a Library, artist: &str, title: &str) -> Option<&'
 }
 
 pub fn record(queue: &[Track], index: usize, position_secs: f64, device: &str) -> Record {
-    Record {
+    from_start(Record {
         updated: now_ms(),
         device: device.to_string(),
         queue: queue.iter().map(to_wire).collect(),
         index,
         position_ms: (position_secs * 1000.0).max(0.0) as u64,
+    })
+}
+
+/// Only podcast episodes carry their position; songs start over.
+fn from_start(mut rec: Record) -> Record {
+    if !rec.queue.get(rec.index).is_some_and(|w| w.key.starts_with("ep:")) {
+        rec.position_ms = 0;
     }
+    rec
 }
 
 // --- library and podcasts ------------------------------------------------------
@@ -409,7 +417,7 @@ pub fn pull(cfg: &SyncConfig) -> Result<Option<Record>> {
         .header("Authorization", &format!("Bearer {}", cfg.key))
         .call()?;
     match resp.status().as_u16() {
-        200 => Ok(Some(serde_json::from_slice(&resp.body_mut().with_config().limit(64 << 20).read_to_vec()?)?)),
+        200 => Ok(Some(from_start(serde_json::from_slice(&resp.body_mut().with_config().limit(64 << 20).read_to_vec()?)?))),
         204 => Ok(None),
         401 => bail!("the server doesn't know this key"),
         s => bail!("server answered {s}"),
@@ -451,6 +459,19 @@ mod tests {
     fn hashed_key_matches_music_android() {
         // The first 8 bytes of SHA-1("queen\0bohemian rhapsody"), as Android's MessageDigest gives them.
         assert_eq!(hashed_key("Queen", "Bohemian Rhapsody"), "h:0c35682c37e07da5");
+    }
+
+    #[test]
+    fn only_episodes_keep_their_position() {
+        let rec = |key: &str| Record {
+            updated: 1,
+            device: "d".into(),
+            queue: vec![Wire { key: key.into(), ..Default::default() }],
+            index: 0,
+            position_ms: 90_000,
+        };
+        assert_eq!(from_start(rec("ep:https://example.com/1.mp3")).position_ms, 90_000);
+        assert_eq!(from_start(rec("sp:0Y2SrByf4G3kbq2nBEHQRn")).position_ms, 0);
     }
 
     #[test]
