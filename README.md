@@ -328,6 +328,33 @@ address. The server speaks plain HTTP, so put HTTPS (or a VPN) in front of it
 before exposing it to the internet: the key is what keeps strangers out, and
 HTTPS keeps it private on the way.
 
+<details>
+<summary>Answering only over Tailscale (or any one network)</summary>
+
+By default the server listens on every network the machine is on. To have it
+answer only on one, give it that network's address. For Tailscale, find the
+machine's address with `tailscale ip -4` (it starts with `100.`), then:
+
+```sh
+systemctl --user edit music-tui-sync
+```
+
+and add:
+
+```ini
+[Service]
+Environment=MUSIC_TUI_LISTEN=100.x.y.z:7700
+```
+
+Then `systemctl --user restart music-tui-sync`. Point the apps at
+`http://100.x.y.z:7700`. Devices on your home network that aren't on Tailscale
+can't reach it any more, and neither can anything else. If the server starts
+before Tailscale is up at boot, it retries until the address exists.
+
+Running it by hand instead: `music-tui serve --listen 100.x.y.z:7700`.
+
+</details>
+
 ### The apps
 
 In music-tui's `config.toml`:
