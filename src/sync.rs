@@ -58,6 +58,17 @@ pub struct Record {
     pub position_ms: u64,
 }
 
+/// One change to the library or podcasts. `at` is when it happened (Unix
+/// ms); 1 marks a device's first upload, which any real change outranks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "lowercase")]
+pub enum Op {
+    List { id: String, name: String, source: String, pos: i64, deleted: bool, at: i64 },
+    Song { list: String, key: String, track: serde_json::Value, pos: i64, present: bool, at: i64 },
+    Ep { key: String, pos: i64, played: bool, at: i64 },
+    Sub { feed: String, show: serde_json::Value, present: bool, at: i64 },
+}
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -108,8 +119,10 @@ pub fn to_wire(t: &Track) -> Wire {
             format!("yt:{v}")
         } else if let Some(d) = id.strip_prefix("dz").filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())) {
             format!("dz:{d}")
-        } else if id.len() == 17 && id.starts_with('h') && id[1..].bytes().all(|b| b.is_ascii_hexdigit()) {
-            hashed_key(&t.track_artist, &t.title)
+        } else if id.len() == 17 && id.starts_with('h') && hashed_key(&t.track_artist, &t.title)[2..] == id[1..] {
+            // A song another device knew only by artist and title. (music-tui's
+            // own hashed imports keep their id, as the other apps were given it.)
+            format!("h:{}", &id[1..])
         } else {
             format!("sp:{id}")
         };
@@ -128,6 +141,16 @@ fn short_hash(s: &str) -> String {
 /// The TUI track for a synced one: a local file when the library has the
 /// song, otherwise the streamed track the TUI would make for it.
 pub fn from_wire(w: &Wire, library: &Library) -> Option<Track> {
+    from_wire_in(w, Some(library))
+}
+
+/// The streamed track for a synced one, never a local file (for the
+/// Streaming library, whose songs are all streamed).
+pub fn from_wire_streamed(w: &Wire) -> Option<Track> {
+    from_wire_in(w, None)
+}
+
+fn from_wire_in(w: &Wire, library: Option<&Library>) -> Option<Track> {
     let mut t = Track {
         id: 0,
         path: PathBuf::new(),
@@ -162,7 +185,7 @@ pub fn from_wire(w: &Wire, library: &Library) -> Option<Track> {
         }
         _ => {}
     }
-    if let Some(local) = local_match(library, &w.artist, &w.title) {
+    if let Some(local) = library.and_then(|l| local_match(l, &w.artist, &w.title)) {
         return Some(local.clone());
     }
     let stem = match kind {
@@ -201,6 +224,168 @@ pub fn record(queue: &[Track], index: usize, position_secs: f64, device: &str) -
         index,
         position_ms: (position_secs * 1000.0).max(0.0) as u64,
     }
+}
+
+// --- library and podcasts ------------------------------------------------------
+
+/// A device's library and podcasts in the shape the server answers with.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct State {
+    pub lists: Vec<List>,
+    pub eps: std::collections::BTreeMap<String, Ep>,
+    pub subs: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct List {
+    pub id: String,
+    pub name: String,
+    pub source: String,
+    pub tracks: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ep {
+    pub pos: i64,
+    pub played: bool,
+}
+
+/// What the server last confirmed: lists with their songs' keys, episodes,
+/// subscribed feeds, and each part's version.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Base {
+    pub versions: std::collections::HashMap<String, i64>,
+    pub lists: Vec<(String, String, Vec<String>)>,
+    pub eps: std::collections::BTreeMap<String, Ep>,
+    pub subs: Vec<String>,
+    /// Playlist ids by name, for lists another device made (music-tui
+    /// knows its lists by name).
+    pub ids: std::collections::HashMap<String, String>,
+}
+
+fn key_of(t: &serde_json::Value) -> String {
+    t["key"].as_str().unwrap_or("").to_string()
+}
+
+fn feed_of(s: &serde_json::Value) -> String {
+    s["feed"].as_str().unwrap_or("").to_string()
+}
+
+impl Base {
+    /// The parts of `state` the server sent, recorded as confirmed.
+    pub fn take(&mut self, state: &State, sent: &Answer) {
+        if sent.lists.is_some() {
+            self.ids = state.lists.iter().map(|l| (l.name.clone(), l.id.clone())).collect();
+            self.lists = state.lists.iter().map(|l| (l.id.clone(), l.name.clone(), l.tracks.iter().map(key_of).collect())).collect();
+        }
+        if sent.eps.is_some() {
+            self.eps = state.eps.clone();
+            self.subs = state.subs.iter().map(feed_of).collect();
+        }
+        self.versions = sent.versions.clone();
+    }
+}
+
+/// The changes from `base` to `cur`. Without a base (the first sync) every
+/// item goes up as of time 1, so changes other devices already made win.
+pub fn diff(base: Option<&Base>, cur: &State, now: i64) -> Vec<Op> {
+    let at = if base.is_some() { now } else { 1 };
+    let empty = Base::default();
+    let b = base.unwrap_or(&empty);
+    let mut ops = Vec::new();
+    let old: std::collections::HashMap<&str, (&str, std::collections::HashSet<&str>)> =
+        b.lists.iter().map(|(id, name, keys)| (id.as_str(), (name.as_str(), keys.iter().map(String::as_str).collect()))).collect();
+    for (i, l) in cur.lists.iter().enumerate() {
+        let was = old.get(l.id.as_str());
+        if was.is_none_or(|(name, _)| *name != l.name) {
+            ops.push(Op::List { id: l.id.clone(), name: l.name.clone(), source: l.source.clone(), pos: i as i64, deleted: false, at });
+        }
+        let had = was.map(|(_, k)| k.clone()).unwrap_or_default();
+        let mut now_keys = std::collections::HashSet::new();
+        for (j, t) in l.tracks.iter().enumerate() {
+            let k = key_of(t);
+            if k.is_empty() || !now_keys.insert(k.clone()) {
+                continue;
+            }
+            if !had.contains(k.as_str()) {
+                ops.push(Op::Song { list: l.id.clone(), key: k, track: t.clone(), pos: j as i64, present: true, at });
+            }
+        }
+        for k in had {
+            if !now_keys.contains(k) {
+                ops.push(Op::Song { list: l.id.clone(), key: k.to_string(), track: serde_json::json!({"key": k}), pos: 0, present: false, at });
+            }
+        }
+    }
+    let ids: std::collections::HashSet<&str> = cur.lists.iter().map(|l| l.id.as_str()).collect();
+    for (id, name, _) in &b.lists {
+        if !ids.contains(id.as_str()) {
+            ops.push(Op::List { id: id.clone(), name: name.clone(), source: String::new(), pos: 0, deleted: true, at });
+        }
+    }
+    for (k, e) in &cur.eps {
+        if b.eps.get(k) != Some(e) {
+            ops.push(Op::Ep { key: k.clone(), pos: e.pos, played: e.played, at });
+        }
+    }
+    for k in b.eps.keys() {
+        if !cur.eps.contains_key(k) {
+            ops.push(Op::Ep { key: k.clone(), pos: 0, played: false, at });
+        }
+    }
+    let feeds: std::collections::HashSet<String> = cur.subs.iter().map(feed_of).collect();
+    for s in &cur.subs {
+        let f = feed_of(s);
+        if !f.is_empty() && !b.subs.contains(&f) {
+            ops.push(Op::Sub { feed: f, show: s.clone(), present: true, at });
+        }
+    }
+    for f in &b.subs {
+        if !feeds.contains(f) {
+            ops.push(Op::Sub { feed: f.clone(), show: serde_json::json!({"feed": f}), present: false, at });
+        }
+    }
+    ops
+}
+
+/// The server's answer: whichever parts changed, and the versions.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Answer {
+    pub versions: std::collections::HashMap<String, i64>,
+    pub lists: Option<Vec<List>>,
+    pub eps: Option<std::collections::BTreeMap<String, Ep>>,
+    pub subs: Option<Vec<serde_json::Value>>,
+}
+
+pub fn sync_state(cfg: &SyncConfig, versions: &std::collections::HashMap<String, i64>, ops: &[Op], timeout: Duration) -> Result<Answer> {
+    let body = serde_json::to_vec(&serde_json::json!({"versions": versions, "ops": ops}))?;
+    let mut resp = agent(timeout)
+        .post(&format!("{}/v1/sync", cfg.server.trim_end_matches('/')))
+        .header("Authorization", &format!("Bearer {}", cfg.key))
+        .header("Content-Type", "application/json")
+        .send(&body[..])?;
+    match resp.status().as_u16() {
+        200 => Ok(serde_json::from_slice(&resp.body_mut().with_config().limit(64 << 20).read_to_vec()?)?),
+        401 => bail!("the server doesn't know this key"),
+        s => bail!("server answered {s}"),
+    }
+}
+
+/// music-android's id for a playlist by name (Java's String.hashCode in hex).
+pub fn list_id(name: &str) -> String {
+    if name == spotify::LIKED {
+        return "liked".into();
+    }
+    let mut h: i32 = 0;
+    for u in name.encode_utf16() {
+        h = h.wrapping_mul(31).wrapping_add(u as i32);
+    }
+    format!("s{:x}", h as u32)
 }
 
 // --- client ----------------------------------------------------------------

@@ -1,5 +1,7 @@
-//! `music-tui serve`: the sync server. It keeps one resume record per user
-//! (see `sync`) in a small SQLite file and hands it to that user's devices.
+//! `music-tui serve`: the sync server. Per user it keeps the resume record
+//! (see `sync`), and the library (likes and playlists) and podcasts (where
+//! each episode stopped, finished ones, subscriptions) as one row per item, so
+//! changes from different devices merge: the newest change to an item wins.
 //! Users are told apart by a random key each device sends as a bearer token;
 //! only a hash of the key is stored.
 
@@ -57,7 +59,9 @@ pub fn main(args: &[String]) -> Result<()> {
         }
         ["remove-user", name] => {
             let n = conn.execute("DELETE FROM users WHERE name = ?1", params![name])?;
-            conn.execute("DELETE FROM now WHERE user = ?1", params![name])?;
+            for table in ["now", "lists", "songs", "eps", "subs", "versions"] {
+                conn.execute(&format!("DELETE FROM {table} WHERE user = ?1"), params![name])?;
+            }
             if n == 0 {
                 bail!("no user named {name}");
             }
@@ -95,7 +99,16 @@ fn open(path: &PathBuf) -> Result<Connection> {
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          CREATE TABLE IF NOT EXISTS users (name TEXT PRIMARY KEY, key_hash TEXT NOT NULL UNIQUE);
-         CREATE TABLE IF NOT EXISTS now (user TEXT PRIMARY KEY, updated INTEGER NOT NULL, device TEXT NOT NULL, body TEXT NOT NULL);",
+         CREATE TABLE IF NOT EXISTS now (user TEXT PRIMARY KEY, updated INTEGER NOT NULL, device TEXT NOT NULL, body TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS lists (user TEXT, id TEXT, name TEXT NOT NULL, source TEXT NOT NULL, pos INTEGER NOT NULL,
+             deleted INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, id));
+         CREATE TABLE IF NOT EXISTS songs (user TEXT, list TEXT, key TEXT, track TEXT NOT NULL, pos INTEGER NOT NULL,
+             present INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, list, key));
+         CREATE TABLE IF NOT EXISTS eps (user TEXT, key TEXT, pos INTEGER NOT NULL, played INTEGER NOT NULL, at INTEGER NOT NULL,
+             PRIMARY KEY (user, key));
+         CREATE TABLE IF NOT EXISTS subs (user TEXT, feed TEXT, show TEXT NOT NULL, present INTEGER NOT NULL, at INTEGER NOT NULL,
+             PRIMARY KEY (user, feed));
+         CREATE TABLE IF NOT EXISTS versions (user TEXT, part TEXT, version INTEGER NOT NULL, PRIMARY KEY (user, part));",
     )?;
     Ok(conn)
 }
@@ -148,7 +161,7 @@ fn handle(mut req: Request, conn: &Mutex<Connection>) {
     if path == "/v1" || path == "/v1/" {
         return reply(req, 200, format!(r#"{{"server":"music-tui","version":"{}","api":1}}"#, env!("CARGO_PKG_VERSION")));
     }
-    if path != "/v1/now" {
+    if path != "/v1/now" && path != "/v1/sync" {
         return reply(req, 404, r#"{"error":"not found"}"#);
     }
     let key = req
@@ -166,6 +179,23 @@ fn handle(mut req: Request, conn: &Mutex<Connection>) {
     let Some(user) = user else {
         return reply(req, 401, r#"{"error":"unknown key"}"#);
     };
+    if path == "/v1/sync" {
+        if *req.method() != Method::Post {
+            return reply(req, 405, r#"{"error":"POST"}"#);
+        }
+        let mut body = Vec::new();
+        if req.as_reader().take(MAX_BODY as u64 + 1).read_to_end(&mut body).is_err() || body.len() > MAX_BODY {
+            return reply(req, 413, r#"{"error":"too large"}"#);
+        }
+        let Ok(r) = serde_json::from_slice::<SyncRequest>(&body) else {
+            return reply(req, 400, r#"{"error":"not a sync request"}"#);
+        };
+        let Ok(mut c) = conn.lock() else { return reply(req, 500, "{}") };
+        return match sync_state(&mut c, &user, r) {
+            Ok(v) => reply(req, 200, v.to_string()),
+            Err(_) => reply(req, 500, r#"{"error":"database"}"#),
+        };
+    }
     match req.method() {
         Method::Get => {
             let body: Option<String> = conn.lock().ok().and_then(|c| {
@@ -206,4 +236,143 @@ fn handle(mut req: Request, conn: &Mutex<Connection>) {
         }
         _ => reply(req, 405, r#"{"error":"GET or PUT"}"#),
     }
+}
+
+// --- library and podcasts ----------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct SyncRequest {
+    /// The versions of each part the device last saw.
+    #[serde(default)]
+    versions: std::collections::HashMap<String, i64>,
+    #[serde(default)]
+    ops: Vec<crate::sync::Op>,
+}
+
+fn version(c: &Connection, user: &str, part: &str) -> i64 {
+    c.query_row("SELECT version FROM versions WHERE user = ?1 AND part = ?2", params![user, part], |r| r.get(0))
+        .unwrap_or(0)
+}
+
+/// Apply a device's changes (each wins only over an older change to the same
+/// item), then answer with each part the device is behind on or changed.
+fn sync_state(c: &mut Connection, user: &str, r: SyncRequest) -> Result<serde_json::Value> {
+    use crate::sync::Op;
+    let tx = c.transaction()?;
+    let mut touched = std::collections::HashSet::new();
+    for op in &r.ops {
+        let (part, changed) = match op {
+            Op::List { id, name, source, pos, deleted, at } => {
+                let next: i64 = tx.query_row("SELECT COALESCE(MAX(pos), -1) + 1 FROM lists WHERE user = ?1", params![user], |r| r.get(0))?;
+                // Seeded lists (at 1) keep the device's order; new ones go last.
+                let pos = if *at <= 1 { *pos } else { next };
+                let n = tx.execute(
+                    "INSERT INTO lists (user, id, name, source, pos, deleted, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(user, id) DO UPDATE SET name = excluded.name, source = excluded.source,
+                         deleted = excluded.deleted, at = excluded.at
+                     WHERE excluded.at >= lists.at AND (lists.name != excluded.name OR lists.deleted != excluded.deleted OR lists.source != excluded.source)",
+                    params![user, id, name, source, pos, *deleted as i64, at],
+                )?;
+                ("lib", n > 0)
+            }
+            Op::Song { list, key, track, pos, present, at } => {
+                let was: Option<bool> = tx
+                    .query_row("SELECT present FROM songs WHERE user = ?1 AND list = ?2 AND key = ?3", params![user, list, key], |r| {
+                        r.get::<_, i64>(0).map(|p| p != 0)
+                    })
+                    .optional()?;
+                let next: i64 = tx.query_row(
+                    "SELECT COALESCE(MAX(pos), -1) + 1 FROM songs WHERE user = ?1 AND list = ?2",
+                    params![user, list],
+                    |r| r.get(0),
+                )?;
+                // Seeded songs keep the device's order; a song added (or added
+                // back) goes at the end, the way every app adds.
+                let pos = if *at <= 1 { *pos } else { next };
+                let n = tx.execute(
+                    "INSERT INTO songs (user, list, key, track, pos, present, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(user, list, key) DO UPDATE SET track = excluded.track, present = excluded.present, at = excluded.at,
+                         pos = CASE WHEN excluded.present AND NOT songs.present THEN ?8 ELSE songs.pos END
+                     WHERE excluded.at >= songs.at AND songs.present != excluded.present",
+                    params![user, list, key, track.to_string(), pos, *present as i64, at, next],
+                )?;
+                ("lib", n > 0 && was != Some(*present))
+            }
+            Op::Ep { key, pos, played, at } => {
+                let n = tx.execute(
+                    "INSERT INTO eps (user, key, pos, played, at) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(user, key) DO UPDATE SET
+                         -- Two first uploads: keep whichever got further.
+                         pos = CASE WHEN excluded.at <= 1 THEN MAX(eps.pos, excluded.pos) ELSE excluded.pos END,
+                         played = CASE WHEN excluded.at <= 1 THEN MAX(eps.played, excluded.played) ELSE excluded.played END,
+                         at = excluded.at
+                     WHERE excluded.at >= eps.at AND (eps.pos != excluded.pos OR eps.played != excluded.played)",
+                    params![user, key, pos, *played as i64, at],
+                )?;
+                ("pods", n > 0)
+            }
+            Op::Sub { feed, show, present, at } => {
+                let n = tx.execute(
+                    "INSERT INTO subs (user, feed, show, present, at) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(user, feed) DO UPDATE SET show = excluded.show, present = excluded.present, at = excluded.at
+                     WHERE excluded.at >= subs.at AND subs.present != excluded.present",
+                    params![user, feed, show.to_string(), *present as i64, at],
+                )?;
+                ("pods", n > 0)
+            }
+        };
+        if changed && touched.insert(part) {
+            tx.execute(
+                "INSERT INTO versions (user, part, version) VALUES (?1, ?2, 1)
+                 ON CONFLICT(user, part) DO UPDATE SET version = version + 1",
+                params![user, part],
+            )?;
+        }
+    }
+    let sent: std::collections::HashSet<&str> = r
+        .ops
+        .iter()
+        .map(|o| if matches!(o, Op::List { .. } | Op::Song { .. }) { "lib" } else { "pods" })
+        .collect();
+    let mut out = serde_json::Map::new();
+    let mut versions = serde_json::Map::new();
+    for part in ["lib", "pods"] {
+        let v = version(&tx, user, part);
+        versions.insert(part.into(), v.into());
+        if !sent.contains(part) && r.versions.get(part) == Some(&v) {
+            continue;
+        }
+        if part == "lib" {
+            let mut st = tx.prepare("SELECT id, name, source FROM lists WHERE user = ?1 AND deleted = 0 ORDER BY pos, at")?;
+            let lists: Vec<(String, String, String)> =
+                st.query_map(params![user], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+            let mut songs = tx.prepare("SELECT track FROM songs WHERE user = ?1 AND list = ?2 AND present = 1 ORDER BY pos, at")?;
+            let mut arr = Vec::new();
+            for (id, name, source) in lists {
+                let tracks: Vec<serde_json::Value> = songs
+                    .query_map(params![user, id], |r| r.get::<_, String>(0))?
+                    .filter_map(|t| t.ok().and_then(|t| serde_json::from_str(&t).ok()))
+                    .collect();
+                arr.push(serde_json::json!({"id": id, "name": name, "source": source, "tracks": tracks}));
+            }
+            out.insert("lists".into(), arr.into());
+        } else {
+            let mut st = tx.prepare("SELECT key, pos, played FROM eps WHERE user = ?1")?;
+            let mut eps = serde_json::Map::new();
+            for row in st.query_map(params![user], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))? {
+                let (k, pos, played) = row?;
+                eps.insert(k, serde_json::json!({"pos": pos, "played": played != 0}));
+            }
+            out.insert("eps".into(), eps.into());
+            let mut st = tx.prepare("SELECT show FROM subs WHERE user = ?1 AND present = 1 ORDER BY at")?;
+            let subs: Vec<serde_json::Value> = st
+                .query_map(params![user], |r| r.get::<_, String>(0))?
+                .filter_map(|s| s.ok().and_then(|s| serde_json::from_str(&s).ok()))
+                .collect();
+            out.insert("subs".into(), subs.into());
+        }
+    }
+    out.insert("versions".into(), versions.into());
+    tx.commit()?;
+    Ok(out.into())
 }
