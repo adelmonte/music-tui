@@ -1,6 +1,6 @@
 [package]
 name = "music-tui"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A keyboard- and mouse-driven terminal music player built with ratatui"
 license = "MIT"
@@ -24,6 +24,7 @@ rodio = { version = "0.22.2", features = ["symphonia-all"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.154"
+souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
 toml = "1.1.2"
 toml_edit = "0.25.12"
 ureq = "3.5.1"
