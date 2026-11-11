@@ -1243,7 +1243,7 @@ fn embed_cover(path: &Path, bytes: &[u8]) -> Result<()> {
 /// URL, Deezer, YouTube, or an anonymous Spotify oEmbed lookup) and kept as a
 /// tiny `<id>.url` note; the image itself is cached by URL, so every track of
 /// an album shares one file.
-fn cover_bytes(path: &Path) -> Option<Vec<u8>> {
+pub fn cover_bytes(path: &Path) -> Option<Vec<u8>> {
     if path.exists()
         && let Some(raw) = scan::read_cover(path)
     {
