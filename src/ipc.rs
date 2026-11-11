@@ -1,7 +1,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -13,6 +14,14 @@ pub enum Cmd {
     VolumeDown,
     Repeat,
     Shuffle,
+    // The rest only come from MPRIS, not from the command-line flags.
+    Play,
+    Pause,
+    /// Seconds, negative for backwards.
+    SeekBy(i64),
+    SeekTo(Duration),
+    /// 0.0 to 1.0.
+    SetVolume(f64),
 }
 
 impl Cmd {
@@ -38,6 +47,7 @@ impl Cmd {
             Self::VolumeDown => "volume-down",
             Self::Repeat => "repeat",
             Self::Shuffle => "shuffle",
+            Self::Play | Self::Pause | Self::SeekBy(_) | Self::SeekTo(_) | Self::SetVolume(_) => "",
         }
     }
 }
@@ -66,14 +76,13 @@ pub fn send_cmd(cmd: Cmd) -> Result<()> {
     Ok(())
 }
 
-/// Bind the command socket and return a channel receiver for incoming commands.
-/// Removes any stale socket file first (crash recovery). Returns `None` if the
-/// socket cannot be bound (non-fatal; the TUI starts without remote control).
-pub fn spawn_listener() -> Option<Receiver<Cmd>> {
+/// Bind the command socket and forward incoming commands to `tx`.
+/// Removes any stale socket file first (crash recovery). Returns false if the
+/// socket cannot be bound (non-fatal; the TUI starts without the flags working).
+pub fn spawn_listener(tx: Sender<Cmd>) -> bool {
     let path = socket_path();
     let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).ok()?;
-    let (tx, rx) = channel();
+    let Ok(listener) = UnixListener::bind(&path) else { return false };
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
@@ -87,7 +96,7 @@ pub fn spawn_listener() -> Option<Receiver<Cmd>> {
             });
         }
     });
-    Some(rx)
+    true
 }
 
 /// Remove the socket file. Called on clean shutdown.

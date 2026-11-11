@@ -269,7 +269,11 @@ Both tabs can be turned off in Settings → Tabs.
 
 ## Remote control
 
-While music-tui is running, you can control it from any other terminal or bind these flags
+music-tui is an MPRIS player, so `playerctl`, desktop media keys, status-bar
+media widgets and phone remotes (KDE Connect, lanlink) see the current track and
+can play, pause, skip, seek and set the volume.
+
+It also has its own flags. While music-tui is running, you can control it from any other terminal or bind these flags
 to media keys in your window manager:
 
 ```sh

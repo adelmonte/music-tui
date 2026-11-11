@@ -10,6 +10,7 @@ mod keys;
 mod menu;
 mod ipc;
 mod model;
+mod mpris;
 mod playlist;
 mod podcast;
 mod radio;
@@ -21,7 +22,7 @@ mod sync;
 mod ui;
 
 use std::io::stdout;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -87,7 +88,10 @@ fn main() -> Result<()> {
         eprintln!("[timing] total startup             : {:?}", t0.elapsed());
     }
 
-    let cmd_rx = ipc::spawn_listener();
+    let (cmd_tx, cmd_rx) = channel();
+    let listening = ipc::spawn_listener(cmd_tx.clone());
+    let mpris = mpris::Mpris::new(cmd_tx);
+    let remote = listening || mpris.is_some();
 
     let mut terminal = ratatui::init();
     execute!(stdout(), EnableMouseCapture)?;
@@ -98,7 +102,7 @@ fn main() -> Result<()> {
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
 
-    let res = run(&mut terminal, &mut app, cmd_rx);
+    let res = run(&mut terminal, &mut app, cmd_rx, mpris, remote);
     app.save_session();
     app.sync_on_quit();
 
@@ -112,7 +116,9 @@ fn main() -> Result<()> {
 fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
-    cmd_rx: Option<Receiver<ipc::Cmd>>,
+    cmd_rx: Receiver<ipc::Cmd>,
+    mut mpris: Option<mpris::Mpris>,
+    remote: bool,
 ) -> Result<()> {
     let mut dirty = true; // always draw the first frame
     loop {
@@ -121,7 +127,7 @@ fn run(
         let busy = app.audio.is_playing()
             || app.scanning.is_some()
             || !app.fetching.is_empty()
-            || cmd_rx.is_some();
+            || remote;
         // Covers still loading: check back quickly so each shows as soon as
         // it's decoded.
         let poll_ms = if app.thumbs_pending() { 30 } else if busy { 100 } else { 500 };
@@ -149,18 +155,16 @@ fn run(
         };
 
         // Drain any incoming remote commands, treating each like a keypress.
-        let had_cmd = if let Some(rx) = &cmd_rx {
-            let mut any = false;
-            while let Ok(cmd) = rx.try_recv() {
-                dispatch_cmd(app, cmd);
-                any = true;
-            }
-            any
-        } else {
-            false
-        };
+        let mut had_cmd = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            dispatch_cmd(app, cmd);
+            had_cmd = true;
+        }
 
         let tick_dirty = app.on_tick();
+        if let Some(m) = &mut mpris {
+            m.update(app);
+        }
 
         if dirty || had_event || had_cmd || tick_dirty {
             terminal.draw(|f| ui::draw(f, app))?;
@@ -183,5 +187,20 @@ fn dispatch_cmd(app: &mut App, cmd: ipc::Cmd) {
         ipc::Cmd::VolumeDown => app.volume_down(),
         ipc::Cmd::Repeat => app.cycle_repeat(),
         ipc::Cmd::Shuffle => app.toggle_shuffle(),
+        ipc::Cmd::Play => {
+            if !app.audio.is_playing() {
+                app.toggle_pause();
+            }
+        }
+        ipc::Cmd::Pause => {
+            if app.audio.is_playing() {
+                app.toggle_pause();
+            }
+        }
+        ipc::Cmd::SeekBy(secs) => app.seek_relative(secs),
+        ipc::Cmd::SeekTo(pos) => {
+            app.audio.seek_to(pos);
+        }
+        ipc::Cmd::SetVolume(v) => app.set_volume(v),
     }
 }
