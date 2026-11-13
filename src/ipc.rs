@@ -22,10 +22,27 @@ pub enum Cmd {
     SeekTo(Duration),
     /// 0.0 to 1.0.
     SetVolume(f64),
+    /// Add a song to Liked Songs (`--like`).
+    Like(Song),
+}
+
+/// A song named by text, e.g. one a phone recognized.
+pub struct Song {
+    pub artist: String,
+    pub title: String,
+    pub album: String,
+    pub isrc: String,
 }
 
 impl Cmd {
     fn from_str(s: &str) -> Option<Self> {
+        if let Some(rest) = s.strip_prefix("like\t") {
+            let mut f = rest.split('\t').map(str::to_string);
+            let (artist, title) = (f.next()?, f.next()?);
+            let album = f.next().unwrap_or_default();
+            let isrc = f.next().unwrap_or_default();
+            return Some(Self::Like(Song { artist, title, album, isrc }));
+        }
         match s.trim() {
             "play-pause" => Some(Self::PlayPause),
             "next" => Some(Self::Next),
@@ -38,7 +55,11 @@ impl Cmd {
         }
     }
 
-    fn as_str(&self) -> &str {
+    fn line(&self) -> String {
+        let clean = |s: &str| s.replace(['\t', '\n', '\r'], " ");
+        if let Self::Like(s) = self {
+            return format!("like\t{}\t{}\t{}\t{}", clean(&s.artist), clean(&s.title), clean(&s.album), clean(&s.isrc));
+        }
         match self {
             Self::PlayPause => "play-pause",
             Self::Next => "next",
@@ -47,8 +68,9 @@ impl Cmd {
             Self::VolumeDown => "volume-down",
             Self::Repeat => "repeat",
             Self::Shuffle => "shuffle",
-            Self::Play | Self::Pause | Self::SeekBy(_) | Self::SeekTo(_) | Self::SetVolume(_) => "",
+            Self::Play | Self::Pause | Self::SeekBy(_) | Self::SeekTo(_) | Self::SetVolume(_) | Self::Like(_) => "",
         }
+        .to_string()
     }
 }
 
@@ -68,11 +90,11 @@ fn socket_path() -> PathBuf {
 }
 
 /// Send a single command to the running music-tui instance and return.
-pub fn send_cmd(cmd: Cmd) -> Result<()> {
+pub fn send_cmd(cmd: &Cmd) -> Result<()> {
     let path = socket_path();
     let mut stream = UnixStream::connect(&path)
         .context("music-tui does not appear to be running")?;
-    writeln!(stream, "{}", cmd.as_str())?;
+    writeln!(stream, "{}", cmd.line())?;
     Ok(())
 }
 
@@ -109,8 +131,17 @@ pub fn cleanup() {
 /// Prints usage and exits on `--help` or an unrecognized `--` flag.
 pub fn parse_flag() -> Option<Cmd> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    for arg in &args {
+    for (i, arg) in args.iter().enumerate() {
         match arg.as_str() {
+            "--like" => {
+                let field = |n: usize| args.get(i + n).cloned().unwrap_or_default();
+                let (artist, title) = (field(1), field(2));
+                if artist.trim().is_empty() || title.trim().is_empty() {
+                    eprintln!("music-tui: --like needs an artist and a title");
+                    std::process::exit(1);
+                }
+                return Some(Cmd::Like(Song { artist, title, album: field(3), isrc: field(4) }));
+            }
             "--play-pause" => return Some(Cmd::PlayPause),
             "--next" => return Some(Cmd::Next),
             "--previous" => return Some(Cmd::Previous),
@@ -148,6 +179,8 @@ fn print_usage() {
          \x20 --volume-up          Raise the volume by 5%%\n\
          \x20 --volume-down        Lower the volume by 5%%\n\
          \x20 --repeat             Cycle the repeat mode\n\
-         \x20 --shuffle            Toggle shuffle"
+         \x20 --shuffle            Toggle shuffle\n\
+         \x20 --like ARTIST TITLE [ALBUM] [ISRC]\n\
+         \x20                      Add a song to Liked Songs (works when not running too)"
     );
 }

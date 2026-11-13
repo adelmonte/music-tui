@@ -293,6 +293,43 @@ fn hashed_id(artist: &str, title: &str) -> String {
     format!("h{:016x}", std::hash::Hasher::finish(&h))
 }
 
+/// A Streaming track for a song known only by name; it's found and
+/// fetched like an imported one.
+pub fn song_track(song: &crate::ipc::Song) -> Track {
+    let (artist, title) = (song.artist.trim(), song.title.trim());
+    let id = safe_id(song.isrc.trim()).unwrap_or_else(|| hashed_id(artist, title));
+    let isrc = (!song.isrc.trim().is_empty()).then(|| song.isrc.trim().to_string());
+    register_extra(&id, None, isrc, None);
+    Track {
+        id: 0,
+        path: audio_dir().join(format!("{id}.m4a")),
+        title: title.to_string(),
+        track_artist: artist.to_string(),
+        album_artist: artist.to_string(),
+        album: song.album.trim().to_string(),
+        year: None,
+        track_no: None,
+        disc_no: None,
+        length_secs: 0,
+    }
+}
+
+/// Add a song to Liked Songs in the saved library, for when music-tui isn't running.
+pub fn like_offline(song: &crate::ipc::Song) {
+    let mut store = load_store();
+    if !store.iter().any(|p| p.name == LIKED) {
+        store.insert(0, Playlist { name: LIKED.to_string(), tracks: Vec::new() });
+    }
+    let Some(list) = store.iter_mut().find(|p| p.name == LIKED) else { return };
+    let mut t = song_track(song);
+    if list.tracks.iter().any(|x| x.path == t.path) {
+        return;
+    }
+    t.id = list.tracks.iter().map(|t| t.id + 1).max().unwrap_or(0);
+    list.tracks.push(t);
+    save_store(&store);
+}
+
 // --- library store ---------------------------------------------------------
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]

@@ -45,7 +45,12 @@ fn main() -> Result<()> {
     }
     // Handle remote-control flags before touching the audio device or display.
     if let Some(cmd) = ipc::parse_flag() {
-        if let Err(e) = ipc::send_cmd(cmd) {
+        if let Err(e) = ipc::send_cmd(&cmd) {
+            // Not running: a like can go straight into the saved library.
+            if let ipc::Cmd::Like(song) = &cmd {
+                spotify::like_offline(song);
+                return Ok(());
+            }
             eprintln!("music-tui: {e}");
             std::process::exit(1);
         }
@@ -202,5 +207,6 @@ fn dispatch_cmd(app: &mut App, cmd: ipc::Cmd) {
             app.audio.seek_to(pos);
         }
         ipc::Cmd::SetVolume(v) => app.set_volume(v),
+        ipc::Cmd::Like(song) => app.like_song(&song),
     }
 }

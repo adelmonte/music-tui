@@ -1846,6 +1846,18 @@ impl App {
         }
     }
 
+    /// `--like` from outside (e.g. a song the phone recognized).
+    pub fn like_song(&mut self, song: &crate::ipc::Song) {
+        if !self.config.spotify.enabled {
+            self.notify("Turn on the Spotify tab in Settings to keep likes.");
+            return;
+        }
+        let t = spotify::song_track(song);
+        if self.add_to_store_list(spotify::LIKED, std::slice::from_ref(&t)) > 0 {
+            self.notify(format!("♥ Liked '{}'.", t.title));
+        }
+    }
+
     /// The track an action applies to in the Streaming tab: the highlighted
     /// one, or the playing one when the list pane is focused.
     fn sp_target_track(&self) -> Option<Track> {
