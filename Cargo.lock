@@ -1836,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "music-tui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "crossterm",
