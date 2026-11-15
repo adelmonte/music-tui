@@ -1843,6 +1843,7 @@ dependencies = [
  "csv",
  "directories",
  "image",
+ "libc",
  "lofty",
  "ogg",
  "opus",

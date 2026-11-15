@@ -11,6 +11,7 @@ categories = ["multimedia::audio", "command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0.102"
+libc = "0.2"
 crossterm = "0.29.0"
 csv = "1.4.0"
 directories = "6.0.0"

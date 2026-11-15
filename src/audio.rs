@@ -39,7 +39,14 @@ pub struct Audio {
 
 impl Audio {
     pub fn new(crossfade_secs: f32) -> Result<Self> {
-        let handle = DeviceSinkBuilder::open_default_sink()
+        // rodio's default error handler prints each stream error (mostly
+        // buffer underruns, which recover on their own) to the terminal, where
+        // the newline scrolls the TUI by a row. Ignore them instead.
+        let quiet = |_: rodio::cpal::StreamError| {};
+        let handle = DeviceSinkBuilder::from_default_device()
+            .map(|b| b.with_error_callback(quiet))
+            .and_then(|b| b.open_sink_or_fallback())
+            .or_else(|_| DeviceSinkBuilder::open_default_sink())
             .context("failed to open default audio output device")?;
         let cur = Player::connect_new(handle.mixer());
         let master_volume = 0.8;

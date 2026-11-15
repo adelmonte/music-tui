@@ -452,6 +452,7 @@ macOS and Windows use their respective conventions via the
 | `~/.cache/music-tui/spotify/music/` | downloaded songs, filed by artist and album |
 | `~/.cache/music-tui/spotify/audio/` | links from song IDs to the downloaded files |
 | `~/.cache/music-tui/spotify/covers/` | album covers for streamed songs (one per album) |
+| `~/.cache/music-tui/stderr.log` | anything printed to stderr while the TUI is open (kept out of the display) |
 | `$XDG_RUNTIME_DIR/music-tui.sock` | Unix socket for CLI remote control |
 
 Your music files are only ever read, never modified. Everything under `~/.cache` can be

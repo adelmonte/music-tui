@@ -22,6 +22,8 @@ mod sync;
 mod ui;
 
 use std::io::stdout;
+use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
@@ -98,7 +100,21 @@ fn main() -> Result<()> {
     let mpris = mpris::Mpris::new(cmd_tx);
     let remote = listening || mpris.is_some();
 
+    let std_hook = std::panic::take_hook();
     let mut terminal = ratatui::init();
+    stderr_to_log();
+    // A panic on the main thread ends the TUI: put the terminal and stderr
+    // back first so the message shows. One on a background thread (say, the
+    // MPRIS service) only goes to the log, leaving the TUI running intact.
+    let tui_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().name() == Some("main") {
+            restore_stderr();
+            tui_hook(info);
+        } else {
+            std_hook(info);
+        }
+    }));
     execute!(stdout(), EnableMouseCapture)?;
     // Disambiguate modified keys (e.g. Alt+[ / Alt+]) on terminals that support
     // the kitty keyboard protocol; ignored elsewhere.
@@ -114,6 +130,7 @@ fn main() -> Result<()> {
     let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     let _ = execute!(stdout(), DisableMouseCapture);
     ratatui::restore();
+    restore_stderr();
     ipc::cleanup();
     res
 }
@@ -208,5 +225,45 @@ fn dispatch_cmd(app: &mut App, cmd: ipc::Cmd) {
         }
         ipc::Cmd::SetVolume(v) => app.set_volume(v),
         ipc::Cmd::Like(song) => app.like_song(&song),
+    }
+}
+
+/// The terminal's stderr, saved while it points at the log.
+static SAVED_STDERR: AtomicI32 = AtomicI32::new(-1);
+
+/// While the TUI is up, stderr goes to a log file. Whatever libraries print
+/// (warnings, ALSA messages, background panics) would otherwise land wherever
+/// the cursor is, and a newline on the bottom row scrolls the whole screen.
+fn stderr_to_log() {
+    let path = config::stderr_log_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let Ok(file) = std::fs::File::create(&path) else {
+        return;
+    };
+    // SAFETY: plain fd calls; `file` stays open until dup2 has copied it.
+    unsafe {
+        let saved = libc::dup(2);
+        if saved < 0 {
+            return;
+        }
+        if libc::dup2(file.as_raw_fd(), 2) < 0 {
+            libc::close(saved);
+            return;
+        }
+        SAVED_STDERR.store(saved, Ordering::SeqCst);
+    }
+}
+
+/// Point stderr back at the terminal.
+fn restore_stderr() {
+    let saved = SAVED_STDERR.swap(-1, Ordering::SeqCst);
+    if saved >= 0 {
+        // SAFETY: `saved` is the descriptor dup'd in `stderr_to_log`.
+        unsafe {
+            libc::dup2(saved, 2);
+            libc::close(saved);
+        }
     }
 }

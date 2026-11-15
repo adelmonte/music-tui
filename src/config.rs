@@ -499,6 +499,13 @@ pub fn art_cache_dir() -> PathBuf {
 
 /// Cache root for the Spotify tab (fetched audio and covers), e.g.
 /// ~/.cache/music-tui/spotify.
+/// Where stderr goes while the TUI is up, e.g. ~/.cache/music-tui/stderr.log.
+pub fn stderr_log_path() -> PathBuf {
+    project_dirs()
+        .map(|d| d.cache_dir().join("stderr.log"))
+        .unwrap_or_else(|| PathBuf::from("music-tui-stderr.log"))
+}
+
 pub fn spotify_cache_dir() -> PathBuf {
     project_dirs()
         .map(|d| d.cache_dir().join("spotify"))
