@@ -31,7 +31,6 @@ use crossterm::event::{
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
-use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 
 use app::App;
 use art::Art;
@@ -127,11 +126,6 @@ fn run(
     remote: bool,
 ) -> Result<()> {
     let mut dirty = true; // always draw the first frame
-    // A whole-screen repaint now and then (and on every tab change) clears
-    // anything left on screen that the last frames didn't put there, such as
-    // rows that occasionally end up one line off.
-    let mut tab = app.tab;
-    let mut repainted = std::time::Instant::now();
     loop {
         // Poll frequently while playing/scanning so position and progress stay
         // current; also stay responsive when remote commands may arrive.
@@ -178,22 +172,7 @@ fn run(
         }
 
         if dirty || had_event || had_cmd || tick_dirty {
-            let full = app.tab != tab || repainted.elapsed() >= Duration::from_secs(20);
-            // Shown in one go, so terminals that support it never flash blank.
-            let _ = execute!(stdout(), BeginSynchronizedUpdate);
-            if full {
-                // Make every cell look stale so the next frame rewrites it all,
-                // without clearing the screen (which would drop kitty's images).
-                for cell in &mut terminal.current_buffer_mut().content {
-                    cell.set_symbol("\u{e000}");
-                }
-                terminal.swap_buffers();
-                tab = app.tab;
-                repainted = std::time::Instant::now();
-            }
-            let drawn = terminal.draw(|f| ui::draw(f, app));
-            let _ = execute!(stdout(), EndSynchronizedUpdate);
-            drawn?;
+            terminal.draw(|f| ui::draw(f, app))?;
             dirty = false;
         }
 
