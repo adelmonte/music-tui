@@ -4442,12 +4442,15 @@ fn dir_stats(dir: &std::path::Path) -> DirStats {
 /// Open a directory in the desktop's file manager (best-effort, detached).
 fn open_in_file_manager(dir: &std::path::Path) {
     let _ = std::fs::create_dir_all(dir);
-    let _ = std::process::Command::new("xdg-open")
+    if let Ok(mut child) = std::process::Command::new("xdg-open")
         .arg(dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .spawn()
+    {
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 fn thumb_window(offset: usize, visible: usize, len: usize) -> impl Iterator<Item = usize> {

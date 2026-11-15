@@ -860,8 +860,10 @@ yt-dlp --quiet --no-warnings --no-progress --no-playlist -f 'bestaudio[acodec=op
     if let Ok(body) = toml::to_string(&pending) {
         let _ = std::fs::write(pending_path(id), body);
     }
-    // The child is waited on through its markers; dropping it doesn't kill it.
-    drop(child);
+    // Playback follows the download through its markers; this thread only
+    // reaps the process when it ends, so it doesn't linger as a zombie.
+    let mut child = child;
+    std::thread::spawn(move || child.wait());
     follow_stream(track, id, ready)
 }
 
@@ -898,7 +900,7 @@ fn follow_stream(track: &Track, id: &str, ready: &dyn Fn()) -> Result<PathBuf> {
             return Ok(file);
         }
         // A download whose process is gone without a marker died with it.
-        if started.elapsed() > Duration::from_secs(2) && !download_alive(id) {
+        if started.elapsed() > Duration::from_secs(2) && !download_alive(id) && !done.exists() {
             let _ = std::fs::write(&failed, "");
             continue;
         }
